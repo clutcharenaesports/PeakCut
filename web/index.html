@@ -396,6 +396,8 @@ img.av{object-fit:cover}
 .lay-prev.crop .ph i{left:0;right:0;top:0;height:100%;transform:none}
 .lay-prev.gaming_split .ph i{left:0;right:0;top:0;height:38%;transform:none;border-bottom:1.5px solid #fff}
 .lay-prev.gaming_split .ph::after{content:"";position:absolute;left:0;right:0;bottom:0;height:58%;background:linear-gradient(135deg,#FF8B33,#FFB27A)}
+.lay-prev.gaming_split_inv .ph i{left:0;right:0;top:0;height:58%;transform:none;border-bottom:1.5px solid #fff;background:linear-gradient(135deg,#FF8B33,#FFB27A)}
+.lay-prev.gaming_split_inv .ph::after{content:"";position:absolute;left:0;right:0;bottom:0;height:38%}
 .lay-prev.podcast_split .ph i{left:0;right:0;top:0;height:48%;transform:none;border-bottom:1px solid #fff}
 .lay-prev.podcast_split .ph::after{content:"";position:absolute;left:0;right:0;bottom:0;height:48%;background:linear-gradient(135deg,#FF8B33,#FFB27A)}
 .lay-prev.screencast .ph i{left:0;right:0;top:0;height:65%;transform:none;border-bottom:1px solid #fff}
@@ -1441,6 +1443,7 @@ const LAYOUT_SHORT = {
   crop: "Fill screen",
   gameplay: "Gameplay + facecam",
   gaming_split: "Gaming Split",
+  gaming_split_inv: "Game Top Split",
   blur_cinematic: "Cinematic",
   screencast: "Screencast / Slides",
   podcast_split: "Podcast 2-Split"
@@ -1819,6 +1822,7 @@ function jobHtml(j) {
   const pic = j.thumb ? `<img src="/media/${esc(j.id)}/thumb.jpg" alt="" loading="lazy">` : ic(j.source?.type === "file" ? "film" : "link");
   return `<div class="job-head"><div class="jt"><span class="jthumb">${pic}${j.duration ? `<span class="du">${fmt(j.duration)}</span>` : ""}</span><div style="min-width:0"><h3>${esc(j.title || j.source.name)}</h3><p class="sub">${meta}</p></div></div>
       <div class="row" style="flex-wrap:nowrap;gap:4px">${busy ? "" : `
+        <button class="btn sm ghost" data-act="moreclips" data-j="${j.id}" title="Make more clips from this video">${ic("scissors")}More clips</button>
         ${j.clips.some(c => c.status === "done") ? `<button class="btn sm icon ghost" data-act="dlall" data-j="${j.id}" title="Download all clips of this video" aria-label="Download all clips of this video">${ic("down")}</button>` : ""}
         <button class="btn sm icon ghost" data-act="deljob" data-j="${j.id}" title="Delete" aria-label="Delete this video and its clips">${ic("trash")}</button>
         <label class="selck" title="Select this video and its clips"><input type="checkbox" data-sel="j:${j.id}" ${sel().has("j:" + j.id) ? "checked" : ""} aria-label="Select this video"></label>`}</div></div>
@@ -2541,11 +2545,19 @@ document.addEventListener("click", async e => {
       if (!await ask("Disconnect this account?", "Posts still waiting for it will fail.", "Disconnect", true)) return;
       await api(`/api/accounts/${d.id}`, {method:"DELETE"}); await tick(); return drawSettings();
     }
+    if (a === "moreclips") {
+      toast("Finding more clips from this video…", "ok");
+      await api(`/api/jobs/${d.j}/more_clips`, {method:"POST", body:JSON.stringify({})});
+      return tick();
+    }
     if (a === "remake") {
-      const body = {}; $$("#clipdlg [data-f]").forEach(i => {
+      const body = { clone: true }; $$("#clipdlg [data-f]").forEach(i => {
         body[i.dataset.f] = i.type === "checkbox" ? i.checked : i.type === "number" ? Number(i.value) : i.value;
       });
-      await send(`/api/jobs/${D.jid}/clips/${D.cid}/render`, body); toast("Re-making the clip…", "ok"); return tick();
+      await send(`/api/jobs/${D.jid}/clips/${D.cid}/render`, body);
+      toast("Created new clip version…", "ok");
+      $("#clipdlg").close();
+      return tick();
     }
     if (a === "postnow" || a === "postqueue") {
       const accs = $$("#clipdlg [data-pacc]:checked").map(i => i.value);

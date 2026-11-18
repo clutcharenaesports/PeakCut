@@ -722,9 +722,22 @@ def create_from_link(body: dict = Body(...)):
     if creator and not creators.get(creator):
         raise HTTPException(404, "No such creator")
     try:
+        clean = jobs.clean_options(body.get("options") or {})
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e) if isinstance(e, ValueError) else "Those options aren't valid.")
+    # If the same video was already processed for this user, find more clips immediately from cached data
+    user_jobs = jobs.list_jobs()
+    existing = next((j for j in user_jobs if j.get("source", {}).get("url") == url and j.get("status") == "done" and (Path(j["dir"]) / "words.json").is_file()), None)
+    if existing:
+        try:
+            jobs.more_clips(existing["id"], clean.get("max_clips"), clean)
+            return jobs.public(existing)
+        except Exception:
+            pass  # Fallback to standard creation if re-use fails
+    try:
         with _create_lock:
             _job_slots()
-            job = jobs.create({"type": "url", "url": url, "name": url}, body.get("options") or {}, creator=creator)
+            job = jobs.create({"type": "url", "url": url, "name": url}, clean, creator=creator)
     except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e) if isinstance(e, ValueError) else "Those options aren't valid.")
     seen = media._PREVIEWS.get(url)  # already looked up while the user was typing: show it straight away
@@ -937,8 +950,22 @@ def rerender(jid: str, cid: str, body: dict = Body(...)):
         raise HTTPException(409, "This clip is still being made. Try again when it has finished.")
     _throttle("render:" + ctx.uid(), 20, 600, "That's a lot of re-makes in a short time. Wait a few minutes.")
     try:
-        jobs.request_render(jid, cid, body)
+        jobs.request_render(jid, cid, body, clone=bool(body.get("clone")))
     except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+    return jobs.public(job)
+
+
+@app.post("/api/jobs/{jid}/more_clips")
+def more_clips_endpoint(jid: str, body: dict = Body({})):
+    _need_verified()
+    job = _job_or_404(jid)
+    if job["status"] in ("queued", "running"):
+        raise HTTPException(409, "This video is still being processed. Wait for it to finish first.")
+    _throttle("moreclips:" + ctx.uid(), 20, 600)
+    try:
+        jobs.more_clips(jid, body.get("count"), body.get("options"))
+    except ValueError as e:
         raise HTTPException(400, str(e))
     return jobs.public(job)
 

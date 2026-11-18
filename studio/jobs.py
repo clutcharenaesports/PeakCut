@@ -9,6 +9,7 @@ import threading
 import time
 import traceback
 import uuid
+import numpy as np
 from pathlib import Path
 
 from . import brain, config, creators, ctx, facecam, games, load, media, quality, render, roman, safe, transcribe, usage
@@ -342,7 +343,7 @@ def delete(jid):
     return bool(job)
 
 
-def request_render(jid, cid, changes: dict):
+def request_render(jid, cid, changes: dict, clone: bool = False):
     job = _jobs[jid]
     clip = next(c for c in job["clips"] if c["id"] == cid)
     new = dict(clip)
@@ -369,13 +370,88 @@ def request_render(jid, cid, changes: dict):
         new["layout"] = DEFAULTS["layout"]
     if "layout" in changes:
         new["layout"] = str(changes["layout"])
-        if new["layout"] in ("gameplay", "gaming_split") and not clip.get("facecam"):
+        if new["layout"] in ("gameplay", "gaming_split", "gaming_split_inv") and not new.get("facecam"):
             face = _facecam(job)
             if face:
                 new["facecam"] = face
-    clip.update(new, status="queued")
+
+    if clone or changes.get("clone"):
+        existing_ids = {c["id"] for c in job["clips"]}
+        idx = len(job["clips"]) + 1
+        while f"clip{idx:02d}" in existing_ids:
+            idx += 1
+        new_cid = f"clip{idx:02d}"
+        new.update(id=new_cid, status="queued", version=0, file=None, cover=None, error=None, made_at=time.time())
+        job["clips"].append(new)
+        save(job)
+        _q.put(("clip", jid, new_cid))
+        return new
+    else:
+        clip.update(new, status="queued")
+        save(job)
+        _q.put(("clip", jid, cid))
+        return clip
+
+
+def more_clips(jid, count=None, options=None):
+    job = _jobs[jid]
+    d = Path(job["dir"])
+    words_file = d / "words.json"
+    if not words_file.is_file():
+        raise ValueError("Words transcript not found for this video.")
+    words = json.loads(words_file.read_text(encoding="utf-8"))
+    if not words:
+        raise ValueError("No transcript words available.")
+
+    o = dict(job.get("options") or DEFAULTS)
+    if options:
+        o.update(clean_options(options))
+
+    num = int(count or o.get("max_clips", 3))
+    min_l = 10 if o.get("auto_duration") else int(o.get("min_len", 15))
+    max_l = 90 if o.get("auto_duration") else int(o.get("max_len", 60))
+    game = job.get("game") or games.read_title(job.get("title", ""))
+
+    existing = [(c["start"], c["end"]) for c in job.get("clips", [])]
+    dur = float(job.get("duration") or (words[-1]["e"] if words else 0.0))
+
+    db = np.zeros(max(1, int(dur) + 1), dtype=np.float32)
+    found, ai = brain.find_clips(words, db, dur, job.get("title", ""),
+                                 job.get("uploader", ""), num * 2, min_l, max_l, print, game=game)
+
+    novel = []
+    for c in found:
+        s, e = c["start"], c["end"]
+        overlaps = any(not (e <= ex[0] or s >= ex[1]) for ex in existing)
+        if not overlaps:
+            novel.append(c)
+            existing.append((s, e))
+            if len(novel) >= num:
+                break
+    if not novel and found:
+        novel = found[:num]
+
+    existing_ids = {c["id"] for c in job["clips"]}
+    face = _facecam(job) if o["layout"] in ("gameplay", "gaming_split", "gaming_split_inv") else None
+
+    new_clips = []
+    for c in novel:
+        idx = len(job["clips"]) + 1
+        while f"clip{idx:02d}" in existing_ids:
+            idx += 1
+        cid = f"clip{idx:02d}"
+        existing_ids.add(cid)
+        c.update(id=cid, style=o["style"], layout=o["layout"],
+                 captions=o.get("captions", True), show_hook=o.get("show_hook", True),
+                 status="queued", version=0)
+        if face:
+            c["facecam"] = face
+        job["clips"].append(c)
+        new_clips.append(c)
+        _q.put(("clip", jid, cid))
+
     save(job)
-    _q.put(("clip", jid, cid))
+    return new_clips
 
 
 def render_one(job, clip, words):
@@ -383,7 +459,7 @@ def render_one(job, clip, words):
     clip["status"] = "rendering"
     save(job)
     try:
-        if clip.get("layout") in ("gameplay", "gaming_split") and not clip.get("facecam"):
+        if clip.get("layout") in ("gameplay", "gaming_split", "gaming_split_inv") and not clip.get("facecam"):
             face = _facecam(job)
             if face:
                 clip["facecam"] = face
@@ -777,7 +853,7 @@ def _run_job(job):
                      captions=o.get("captions", True), show_hook=o.get("show_hook", True), status="queued", version=0)
             # Only layouts that use a webcam look for it, and only once: a
             # stream with no webcam is not looked for again on every clip of it.
-            if o["layout"] in ("gameplay", "gaming_split") and face is False:
+            if o["layout"] in ("gameplay", "gaming_split", "gaming_split_inv") and face is False:
                 face = _facecam(job)
             if face:
                 c["facecam"] = face

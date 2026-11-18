@@ -88,6 +88,7 @@ LAYOUTS = {
     "crop": "Fill the screen (centre crop)",
     "gameplay": "Gameplay fills the screen, facecam in the corner",
     "gaming_split": "Gaming Split (Top facecam + Bottom game)",
+    "gaming_split_inv": "Gaming Split (Top game + Bottom facecam)",
     "blur_cinematic": "Cinematic 16:9 + soft glow backdrop",
     "screencast": "Screencast (Full content on top + Speaker below)",
     "podcast_split": "Podcast Split (2-person stacked conversation)"
@@ -123,12 +124,14 @@ def _groups(words, per):
 
 def geometry(src_w, src_h, layout):
     """Where the video sits in the 1080x1920 frame, and where hook and captions go."""
-    if src_h >= src_w and layout not in ("crop", "gaming_split", "podcast_split", "screencast"):
+    if src_h >= src_w and layout not in ("crop", "gaming_split", "gaming_split_inv", "podcast_split", "screencast"):
         layout = "crop"  # already vertical or square: nothing to gain from a blurred fill
-    if layout in ("gaming_split", "podcast_split", "screencast"):
+    if layout in ("gaming_split", "gaming_split_inv", "podcast_split", "screencast"):
         fg_h = 1080
         if layout == "gaming_split":
             return layout, fg_h, 180, 840   # captions sit right on the dividing line between facecam and gameplay
+        if layout == "gaming_split_inv":
+            return layout, fg_h, 180, 1100  # game top (1160px), captions near split line, facecam below (760px)
         if layout == "podcast_split":
             return layout, fg_h, 160, 960   # captions centered on middle horizontal divider
         if layout == "screencast":
@@ -265,24 +268,30 @@ def _filter(layout, fg_h, facecam=None):
                     f"[b][p]overlay={W - PIP_W - PIP_MARGIN}:{PIP_MARGIN}[v0];")
     if layout == "crop" or (layout == "gameplay" and not facecam):
         return f"[0:v]fps={config.OUT_FPS},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1[v0];"
-    if layout == "gaming_split":
-        # If webcam is detected, crop the exact detected facecam box for top half.
-        # Otherwise fallback to top-right corner region.
+    if layout in ("gaming_split", "gaming_split_inv"):
+        # If webcam is detected, crop the exact detected facecam box.
+        # Otherwise fallback to top-right corner region with high zoom.
         cam_h = 760
         game_h = H - cam_h  # 1160
         if facecam and len(facecam) == 4 and int(facecam[2]) > 8 and int(facecam[3]) > 8:
             fx, fy, fw, fh = (int(v) for v in facecam)
             # Crop detected facecam precisely, scale to 1080 width with dark background/center fit or fill
             cam_filter = (f"[cam_raw]crop={fw}:{fh}:{fx}:{fy},"
-                          f"scale={W}:{cam_h}:force_original_aspect_ratio=increase,crop={W}:{cam_h},setsar=1[top_cam];")
+                          f"scale={W}:{cam_h}:force_original_aspect_ratio=increase,crop={W}:{cam_h},setsar=1[cam_layer];")
         else:
             # Fallback when no facecam detected: crop top-right streamer area with high zoom
-            cam_filter = f"[cam_raw]crop=iw*0.35:ih*0.35:iw*0.65:0,scale={W}:{cam_h}:force_original_aspect_ratio=increase,crop={W}:{cam_h},setsar=1[top_cam];"
+            cam_filter = f"[cam_raw]crop=iw*0.35:ih*0.35:iw*0.65:0,scale={W}:{cam_h}:force_original_aspect_ratio=increase,crop={W}:{cam_h},setsar=1[cam_layer];"
         
-        return (f"[0:v]fps={config.OUT_FPS},split=2[cam_raw][game_raw];"
-                f"{cam_filter}"
-                f"[game_raw]scale={W}:{game_h}:force_original_aspect_ratio=increase,crop={W}:{game_h},setsar=1[bottom_game];"
-                f"[top_cam][bottom_game]vstack=inputs=2,scale={W}:{H},setsar=1[v0];")
+        if layout == "gaming_split":
+            return (f"[0:v]fps={config.OUT_FPS},split=2[cam_raw][game_raw];"
+                    f"{cam_filter}"
+                    f"[game_raw]scale={W}:{game_h}:force_original_aspect_ratio=increase,crop={W}:{game_h},setsar=1[game_layer];"
+                    f"[cam_layer][game_layer]vstack=inputs=2,scale={W}:{H},setsar=1[v0];")
+        else:
+            return (f"[0:v]fps={config.OUT_FPS},split=2[game_raw][cam_raw];"
+                    f"{cam_filter}"
+                    f"[game_raw]scale={W}:{game_h}:force_original_aspect_ratio=increase,crop={W}:{game_h},setsar=1[game_layer];"
+                    f"[game_layer][cam_layer]vstack=inputs=2,scale={W}:{H},setsar=1[v0];")
     if layout == "podcast_split":
         # Left speaker top half, Right speaker bottom half
         half_h = H // 2  # 960
