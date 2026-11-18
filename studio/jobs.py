@@ -365,6 +365,12 @@ def request_render(jid, cid, changes: dict):
         new["style"] = DEFAULTS["style"]
     if new.get("layout") not in render.LAYOUTS:
         new["layout"] = DEFAULTS["layout"]
+    if "layout" in changes:
+        new["layout"] = str(changes["layout"])
+        if new["layout"] in ("gameplay", "gaming_split") and not clip.get("facecam"):
+            face = _facecam(job)
+            if face:
+                new["facecam"] = face
     clip.update(new, status="queued")
     save(job)
     _q.put(("clip", jid, cid))
@@ -757,9 +763,9 @@ def _run_job(job):
             c.update(id=f"clip{len(job['clips']) + 1:02d}", start=round(c["start"] + shift, 2),
                      end=round(c["end"] + shift, 2), style=o["style"], layout=o["layout"],
                      captions=o.get("captions", True), status="queued", version=0)
-            # Only the gameplay layout uses a webcam, so it is only looked for then, and only once: a
+            # Only layouts that use a webcam look for it, and only once: a
             # stream with no webcam is not looked for again on every clip of it.
-            if o["layout"] == "gameplay" and face is False:
+            if o["layout"] in ("gameplay", "gaming_split") and face is False:
                 face = _facecam(job)
             if face:
                 c["facecam"] = face

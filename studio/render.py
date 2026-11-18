@@ -88,7 +88,9 @@ LAYOUTS = {
     "crop": "Fill the screen (centre crop)",
     "gameplay": "Gameplay fills the screen, facecam in the corner",
     "gaming_split": "Gaming Split (Top facecam + Bottom game)",
-    "blur_cinematic": "Cinematic 16:9 + soft glow backdrop"
+    "blur_cinematic": "Cinematic 16:9 + soft glow backdrop",
+    "screencast": "Screencast (Full content on top + Speaker below)",
+    "podcast_split": "Podcast Split (2-person stacked conversation)"
 }
 
 
@@ -121,11 +123,16 @@ def _groups(words, per):
 
 def geometry(src_w, src_h, layout):
     """Where the video sits in the 1080x1920 frame, and where hook and captions go."""
-    if src_h >= src_w and layout not in ("crop", "gaming_split"):
+    if src_h >= src_w and layout not in ("crop", "gaming_split", "podcast_split", "screencast"):
         layout = "crop"  # already vertical or square: nothing to gain from a blurred fill
-    if layout == "gaming_split":
-        fg_h = 1080  # main gameplay bottom section
-        return layout, fg_h, 220, 1020  # captions sit nicely above gameplay / on division
+    if layout in ("gaming_split", "podcast_split", "screencast"):
+        fg_h = 1080
+        if layout == "gaming_split":
+            return layout, fg_h, 180, 840   # captions sit right on the dividing line between facecam and gameplay
+        if layout == "podcast_split":
+            return layout, fg_h, 160, 960   # captions centered on middle horizontal divider
+        if layout == "screencast":
+            return layout, fg_h, 140, 1260  # captions near bottom of screencast content
     if layout in ("blur", "blur_cinematic"):
         fg_h = min(H, int(round(W * src_h / src_w / 2)) * 2)
     elif layout == "zoom":
@@ -259,12 +266,38 @@ def _filter(layout, fg_h, facecam=None):
     if layout == "crop" or (layout == "gameplay" and not facecam):
         return f"[0:v]fps={config.OUT_FPS},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1[v0];"
     if layout == "gaming_split":
-        # Upper facecam: top-right region of 16:9 crop scaled to top of 9:16 frame (height 840)
-        # Lower gameplay: center region scaled to 1080x1080 placed at bottom
+        # If webcam is detected, crop the exact detected facecam box for top half.
+        # Otherwise fallback to top-right corner region.
+        cam_h = 760
+        game_h = H - cam_h  # 1160
+        if facecam and len(facecam) == 4 and int(facecam[2]) > 8 and int(facecam[3]) > 8:
+            fx, fy, fw, fh = (int(v) for v in facecam)
+            # Crop detected facecam precisely, scale to 1080 width with dark background/center fit or fill
+            cam_filter = (f"[cam_raw]crop={fw}:{fh}:{fx}:{fy},"
+                          f"scale={W}:{cam_h}:force_original_aspect_ratio=increase,crop={W}:{cam_h},setsar=1[top_cam];")
+        else:
+            # Fallback when no facecam detected: crop top-right streamer area
+            cam_filter = f"[cam_raw]scale=iw*1.2:ih*1.2,crop={W}:{cam_h}:iw-{W}:0,setsar=1[top_cam];"
+        
         return (f"[0:v]fps={config.OUT_FPS},split=2[cam_raw][game_raw];"
-                f"[cam_raw]scale=iw*1.2:ih*1.2,crop={W}:780:iw-{W}:0,setsar=1[top_cam];"
-                f"[game_raw]scale={W}:1140:force_original_aspect_ratio=increase,crop={W}:1140,setsar=1[bottom_game];"
+                f"{cam_filter}"
+                f"[game_raw]scale={W}:{game_h}:force_original_aspect_ratio=increase,crop={W}:{game_h},setsar=1[bottom_game];"
                 f"[top_cam][bottom_game]vstack=inputs=2,scale={W}:{H},setsar=1[v0];")
+    if layout == "podcast_split":
+        # Left speaker top half, Right speaker bottom half
+        half_h = H // 2  # 960
+        return (f"[0:v]fps={config.OUT_FPS},split=2[left_spk][right_spk];"
+                f"[left_spk]crop=iw/2:ih:0:0,scale={W}:{half_h}:force_original_aspect_ratio=increase,crop={W}:{half_h},setsar=1[spk1];"
+                f"[right_spk]crop=iw/2:ih:iw/2:0,scale={W}:{half_h}:force_original_aspect_ratio=increase,crop={W}:{half_h},setsar=1[spk2];"
+                f"[spk1][spk2]vstack=inputs=2,scale={W}:{H},setsar=1[v0];")
+    if layout == "screencast":
+        # Full content/slides at top, speaker below
+        screen_h = 1240
+        spk_h = H - screen_h  # 680
+        return (f"[0:v]fps={config.OUT_FPS},split=2[screen_raw][speaker_raw];"
+                f"[screen_raw]scale={W}:-2,pad={W}:{screen_h}:0:(oh-ih)/2:color=black,setsar=1[top_screen];"
+                f"[speaker_raw]scale={W}:{spk_h}:force_original_aspect_ratio=increase,crop={W}:{spk_h},setsar=1[bottom_spk];"
+                f"[top_screen][bottom_spk]vstack=inputs=2,scale={W}:{H},setsar=1[v0];")
     if layout == "blur_cinematic":
         return (f"[0:v]fps={config.OUT_FPS},split=2[a][b];"
                 f"[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=10:3,"
