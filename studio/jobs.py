@@ -107,8 +107,8 @@ _by_user: dict = {}                       # user -> {job id: job}: listing one p
 _lock = threading.RLock()
 on_clip_ready: list = []   # callbacks (job, clip), run once when a clip first finishes
 
-DEFAULTS = {"max_clips": 6, "min_len": 15, "max_len": 60, "style": "bounce", "layout": "blur", "quality": 720,
-            "range_start": None, "range_end": None, "captions": True}
+DEFAULTS = {"max_clips": 6, "min_len": 15, "max_len": 60, "auto_duration": True, "style": "bounce", "layout": "blur", "quality": 720,
+            "range_start": None, "range_end": None, "captions": True, "show_hook": True}
 
 
 LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080)}
@@ -118,9 +118,9 @@ def clean_options(options) -> dict:
     """Only known settings, each inside its allowed range. Raises ValueError on nonsense."""
     out = {}
     for k, v in (options if isinstance(options, dict) else {}).items():
-        if k == "captions":
+        if k in ("captions", "auto_duration", "show_hook"):
             if not isinstance(v, bool):
-                raise ValueError("Captions must be on or off.")
+                raise ValueError(f"{k} must be on or off.")
             out[k] = v
             continue
         if k not in DEFAULTS or v in ("", None):
@@ -348,6 +348,8 @@ def request_render(jid, cid, changes: dict):
     new = dict(clip)
     if "captions" in changes:
         new.update(clean_options({"captions": changes["captions"]}))
+    if "show_hook" in changes:
+        new.update(clean_options({"show_hook": changes["show_hook"]}))
     for k in ("start", "end"):
         if k in changes:
             new[k] = round(float(changes[k]), 2)
@@ -741,8 +743,10 @@ def _run_job(job):
             continue
         quota = max(1, math.ceil(left / (len(blocks) - bi)))
         s0 = int((a - lo) / 16000)
+        min_l = 10 if o.get("auto_duration") else int(o["min_len"])
+        max_l = 90 if o.get("auto_duration") else int(o["max_len"])
         found, ai = brain.find_clips(bw, db[s0: s0 + int((b - a) / 16000) + 1], (b - a) / 16000, job["title"],
-                                     job["uploader"], quota, int(o["min_len"]), int(o["max_len"]), notes.append, game=game)
+                                     job["uploader"], quota, min_l, max_l, notes.append, game=game)
         tokens += ai.get("tokens", 0)
         model = ai.get("model") or model
         if ai.get("note"):
@@ -762,7 +766,7 @@ def _run_job(job):
         for c in found:
             c.update(id=f"clip{len(job['clips']) + 1:02d}", start=round(c["start"] + shift, 2),
                      end=round(c["end"] + shift, 2), style=o["style"], layout=o["layout"],
-                     captions=o.get("captions", True), status="queued", version=0)
+                     captions=o.get("captions", True), show_hook=o.get("show_hook", True), status="queued", version=0)
             # Only layouts that use a webcam look for it, and only once: a
             # stream with no webcam is not looked for again on every clip of it.
             if o["layout"] in ("gameplay", "gaming_split") and face is False:
