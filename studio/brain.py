@@ -60,8 +60,8 @@ Rules:
 - hook: at most 5 words, ALL CAPS, shown as big text on the video. Curiosity, but true to what happens.
 - title: at most 70 characters, for the post.
 - description: one or two sentences.
-- hashtags: 5 tags without the # sign.
-- highlight_words: 3 to 6 single words spoken in the clip that carry the punch.
+- hashtags: 5 to 8 high-ranking tags tailored for YouTube Shorts and TikTok algorithms (without the # sign), e.g. Shorts, Gaming, Viral, TwitchClips, and specific game or topic keywords.
+- highlight_words: 3 to 6 single words spoken in the clip that carry the punch. Optionally include a fitting emoji (e.g. 🔥, 💀, 😱, 🚀, 😂, 👑) alongside the word.
 - Write hook, title, description, hashtags and highlight_words in English. If the video is in Hindi or Urdu,
   you may write them the way people type Hindi and Urdu in Roman letters (Hinglish: "yaar ye kya hai"), never
   in Devanagari or Urdu script. For any other language, write them in English.

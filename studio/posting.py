@@ -101,8 +101,20 @@ def on_clip_ready(job, clip):
 
 
 def _caption(clip, creator):
-    tags = " ".join("#" + h for h in clip.get("hashtags", []))
-    return "\n\n".join(x for x in (clip.get("description", ""), tags, creator.get("post_footer", "")) if x)
+    tags = [h if h.startswith("#") else f"#{h}" for h in clip.get("hashtags", [])]
+    tag_str = " ".join(tags)
+    hook = clip.get("hook")
+    desc = clip.get("description", "")
+    parts = []
+    if hook:
+        parts.append(f"🔥 {hook}")
+    if desc:
+        parts.append(desc)
+    if tag_str:
+        parts.append(tag_str)
+    if creator.get("post_footer"):
+        parts.append(creator["post_footer"])
+    return "\n\n".join(parts)
 
 
 def _post(p):

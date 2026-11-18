@@ -18,6 +18,10 @@ STYLES = {
              "strong": "00D7FF", "outline": 7, "pop": 114, "upper": True, "per": 2},
     "clean": {"label": "Clean", "font": "Poppins ExtraBold", "size": 100, "base": "FFFFFF", "active": "6BD7FF",
               "strong": "FFFFFF", "outline": 5, "pop": 106, "upper": False, "per": 4},
+    "hormozi": {"label": "Hormozi Pop", "font": "Poppins ExtraBold", "size": 136, "base": "FFFFFF", "active": "2BF6FF",
+                "strong": "00FF7F", "outline": 8, "pop": 118, "upper": True, "per": 2},
+    "beast": {"label": "Beast Bold", "font": "Anton", "size": 156, "base": "FFFFFF", "active": "0045FF",
+              "strong": "00F0FF", "outline": 8, "pop": 120, "upper": True, "per": 2},
 }
 HOOK = {"font": "Poppins ExtraBold", "size": 96, "ink": "14100E", "box": "FFFFFF", "pad_x": 36, "pad_y": 22, "radius": 26,
         "max_w": 900}
@@ -78,8 +82,14 @@ def install_fonts():
             shutil.copyfile(f, config.FONTS_DIR / f.name)
 
 
-LAYOUTS = {"blur": "Full frame + blurred fill", "zoom": "Zoomed in + blurred fill", "crop": "Fill the screen (centre crop)",
-           "gameplay": "Gameplay fills the screen, facecam in the corner"}
+LAYOUTS = {
+    "blur": "Full frame + blurred fill",
+    "zoom": "Zoomed in + blurred fill",
+    "crop": "Fill the screen (centre crop)",
+    "gameplay": "Gameplay fills the screen, facecam in the corner",
+    "gaming_split": "Gaming Split (Top facecam + Bottom game)",
+    "blur_cinematic": "Cinematic 16:9 + soft glow backdrop"
+}
 
 
 def _ts(t):
@@ -111,9 +121,12 @@ def _groups(words, per):
 
 def geometry(src_w, src_h, layout):
     """Where the video sits in the 1080x1920 frame, and where hook and captions go."""
-    if src_h >= src_w and layout != "crop":
+    if src_h >= src_w and layout not in ("crop", "gaming_split"):
         layout = "crop"  # already vertical or square: nothing to gain from a blurred fill
-    if layout == "blur":
+    if layout == "gaming_split":
+        fg_h = 1080  # main gameplay bottom section
+        return layout, fg_h, 220, 1020  # captions sit nicely above gameplay / on division
+    if layout in ("blur", "blur_cinematic"):
         fg_h = min(H, int(round(W * src_h / src_w / 2)) * 2)
     elif layout == "zoom":
         fg_h = 1000
@@ -245,6 +258,20 @@ def _filter(layout, fg_h, facecam=None):
                     f"[b][p]overlay={W - PIP_W - PIP_MARGIN}:{PIP_MARGIN}[v0];")
     if layout == "crop" or (layout == "gameplay" and not facecam):
         return f"[0:v]fps={config.OUT_FPS},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1[v0];"
+    if layout == "gaming_split":
+        # Upper facecam: top-right region of 16:9 crop scaled to top of 9:16 frame (height 840)
+        # Lower gameplay: center region scaled to 1080x1080 placed at bottom
+        return (f"[0:v]fps={config.OUT_FPS},split=2[cam_raw][game_raw];"
+                f"[cam_raw]scale=iw*1.2:ih*1.2,crop={W}:780:iw-{W}:0,setsar=1[top_cam];"
+                f"[game_raw]scale={W}:1140:force_original_aspect_ratio=increase,crop={W}:1140,setsar=1[bottom_game];"
+                f"[top_cam][bottom_game]vstack=inputs=2,scale={W}:{H},setsar=1[v0];")
+    if layout == "blur_cinematic":
+        return (f"[0:v]fps={config.OUT_FPS},split=2[a][b];"
+                f"[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=10:3,"
+                f"scale={W}:{H},eq=brightness=-0.22:saturation=1.35[bg];"
+                f"[b]scale={W}-80:{fg_h}-45:force_original_aspect_ratio=decrease,"
+                f"pad={W}:{fg_h}:(ow-iw)/2:(oh-ih)/2:color=black@0.6[fg];"
+                f"[bg][fg]overlay=0:(H-h)/2,setsar=1[v0];")
     return (f"[0:v]fps={config.OUT_FPS},split=2[a][b];"
             f"[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=6:2,"
             f"scale={W}:{H},eq=brightness=-0.14:saturation=1.15[bg];"
