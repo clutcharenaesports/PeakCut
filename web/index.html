@@ -383,8 +383,8 @@ img.av{object-fit:cover}
 .composer.compact .tile-o{background:var(--muted)}
 .tile-o:enabled:hover,.tile-o:focus-visible{background:#EDE3DB;color:var(--text)}
 .tile-o[aria-pressed=true]{background:var(--brand-soft);color:var(--brand-ink);border-color:var(--brand-deep);box-shadow:0 0 0 1px var(--brand-deep)}
-.tile-o .tile-tick{position:absolute;top:4px;right:4px;width:18px;height:18px;border-radius:50%;background:var(--brand-deep);color:#fff;display:none;align-items:center;justify-content:center;box-shadow:0 1px 3px rgba(0,0,0,0.25)}
-.tile-o .tile-tick svg{width:11px;height:11px}
+.tile-o .tile-tick{position:absolute;top:6px;right:6px;width:16px;height:16px;border-radius:50%;background:var(--brand-deep);color:#fff;display:none;align-items:center;justify-content:center;z-index:2}
+.tile-o .tile-tick svg{width:10px;height:10px}
 .tile-o[aria-pressed=true] .tile-tick{display:flex}
 .cap-prev{height:54px;border-radius:7px;background:#1E1612;display:flex;align-items:center;justify-content:center;white-space:nowrap;overflow:hidden;font-size:14px;line-height:1;color:#fff;letter-spacing:0;-webkit-text-stroke:1px #000;paint-order:stroke fill}
 .cap-prev b{font-weight:inherit}
@@ -409,12 +409,28 @@ img.av{object-fit:cover}
 .seg button:hover,.seg button:focus-visible{background:#EDE3DB;color:var(--text)}
 .seg button[aria-pressed=true]{background:var(--brand-soft);color:var(--brand-ink)}
 .seg button[aria-pressed=true] small{color:#B8693A}
+.seg.seg-dur{background:#fff;padding:2px;border-radius:8px;gap:2px}
+.composer.compact .seg.seg-dur{background:var(--muted)}
+.seg.seg-dur button{padding:3px 10px;font-size:11px;font-weight:600;border-radius:6px;flex-direction:row;gap:4px;color:var(--dim)}
+.seg.seg-dur button[aria-pressed=true]{background:var(--brand-soft);color:var(--brand-ink)}
+.dur-auto-box{grid-column:span 2;background:#fff;border-radius:10px;padding:8px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0}
+.composer.compact .dur-auto-box{background:var(--muted)}
+.dur-auto-main{display:flex;flex-direction:column;gap:1px}
+.dur-auto-val{font-size:18px;font-weight:700;color:var(--brand-ink);letter-spacing:-.01em;font-variant-numeric:tabular-nums;line-height:1.1}
+.dur-auto-lbl{font-size:11px;font-weight:600;color:var(--dim)}
+.dur-auto-desc{font-size:11px;color:var(--faint);line-height:1.3;max-width:230px;text-align:right}
+.dur-custom-wrap{display:contents}
+.ob-foot{margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,0.06)}
+.sw-row{display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--dim)}
+.sw-row input{accent-color:var(--brand);margin:0}
+.sw-row span{font-weight:600;color:var(--text)}
+.sw-row small{color:var(--faint);margin-left:auto}
 .range{display:flex;align-items:center;gap:8px}
 .range label{flex:1;display:flex;align-items:center;gap:6px;background:#fff;border-radius:10px;padding:0 10px;height:44px;font-size:12px;color:var(--faint);min-width:0}
 .composer.compact .range label{background:var(--muted)}
 .range input,.range input:focus{flex:1;min-width:0;height:40px;border:0;background:transparent;padding:0;font-size:15px;font-weight:600;color:var(--brand-ink);-moz-appearance:textfield}
 .range>svg{width:14px;height:14px;color:var(--faint);flex:none}
-@media (max-width:640px){.og{grid-template-columns:1fr}.nsteps{grid-template-columns:1fr}}
+@media (max-width:640px){.og{grid-template-columns:1fr}.nsteps{grid-template-columns:1fr}.dur-auto-box{grid-column:1;flex-direction:column;align-items:flex-start}.dur-auto-desc{text-align:left}.sw-row{flex-wrap:wrap}.sw-row small{margin-left:0;width:100%}}
 
 /* ---------- home blocks */
 .tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:16px}
@@ -1382,23 +1398,32 @@ function drawAdd(variant) {
       <button class="btn primary" id="goBtn">${ic("scissors")}Make clips</button>
     </div>
     <div class="composer-opts" inert><div class="og">
-      <div class="ob wide"><div class="ot cap-head"><span>Clip duration</span>
-        <div class="seg" role="group" aria-label="Duration mode" style="margin-left:auto;padding:2px">
-          <button type="button" data-seg="o_dur_mode" data-v="auto" aria-pressed="true" style="padding:4px 8px;font-size:11px">Auto<small>AI decides</small></button>
-          <button type="button" data-seg="o_dur_mode" data-v="custom" aria-pressed="false" style="padding:4px 8px;font-size:11px">Custom<small>Set seconds</small></button>
+      <div class="ob wide"><div class="ot cap-head"><span>Clips</span>
+        <div class="seg seg-dur" role="group" aria-label="Duration mode">
+          <button type="button" data-seg="o_dur_mode" data-v="auto" aria-pressed="true">Auto duration</button>
+          <button type="button" data-seg="o_dur_mode" data-v="custom" aria-pressed="false">Custom</button>
         </div></div>
         <input type="hidden" id="o_dur_mode" value="auto">
-        <div id="dur_auto_note" class="help" style="margin-top:6px;font-size:12px;color:var(--dim)">The AI picks natural start & end lengths (10–90s) to capture the full story without filler.</div>
-        <div class="nsteps" id="dur_custom_steps" style="display:none;margin-top:8px">
-          ${stepper("o_min", "Shortest", c?.min_len ?? 15, 5, 120, 5, "s")}
-          ${stepper("o_maxlen", "Longest", c?.max_len ?? 60, 10, 180, 5, "s")}
+        <div class="nsteps">
+          ${stepper("o_max", "How many", c?.max_clips ?? 6, 1, 20, 1, "")}
+          <div class="dur-auto-box" id="dur_auto_box">
+            <div class="dur-auto-main">
+              <span class="dur-auto-val">10 – 90s</span>
+              <span class="dur-auto-lbl">Natural pacing</span>
+            </div>
+            <span class="dur-auto-desc">AI clips full thoughts and highlights without fixed cuts</span>
+          </div>
+          <div id="dur_custom_steps" class="dur-custom-wrap" style="display:none">
+            ${stepper("o_min", "Shortest", c?.min_len ?? 15, 5, 120, 5, "s")}
+            ${stepper("o_maxlen", "Longest", c?.max_len ?? 60, 10, 180, 5, "s")}
+          </div>
+        </div>
+        <div class="ob-foot">
+          <label class="sw-row"><input type="checkbox" id="o_show_hook" ${c?.show_hook === false ? "" : "checked"}><span>Show title on video</span><small>Overlay headline hook text at the top of the clip</small></label>
         </div>
       </div>
       <div class="ob"><div class="ot cap-head"><span id="o_style_label">Caption style</span>
-        <div style="display:flex;gap:12px;align-items:center;margin-left:auto">
-          <label><input type="checkbox" id="o_show_hook" ${c?.show_hook === false ? "" : "checked"}>Show title on video</label>
-          <label><input type="checkbox" id="o_captions" data-caption-toggle ${c?.captions === false ? "" : "checked"}>Captions</label>
-        </div></div>
+        <label><input type="checkbox" id="o_captions" data-caption-toggle ${c?.captions === false ? "" : "checked"}>Generate captions</label></div>
         ${choice("o_style", Object.entries(S.status.styles).map(([k, v]) => ({v:k, label:v, prev:capPrev(k)})), c?.style ?? "bounce", c?.captions === false)}</div>
       <div class="ob"><div class="ot">Layout</div>${choice("o_layout", Object.entries(S.status.layouts).map(([k, v]) => ({v:k, label:LAYOUT_SHORT[k] || v, title:v, prev:`<span class="lay-prev ${esc(k)}"><span class="ph"><i></i></span></span>`})), c?.layout ?? "blur")}</div>
       <div class="ob"><div class="ot">Video quality</div><input type="hidden" id="o_quality" value="720"><div class="seg" role="group" aria-label="Video quality">
@@ -1468,8 +1493,10 @@ document.addEventListener("click", e => {
     sg.parentElement.querySelectorAll("[data-seg]").forEach(b => b.setAttribute("aria-pressed", String(b === sg)));
     if (sg.dataset.seg === "o_dur_mode") {
       const isAuto = sg.dataset.v === "auto";
-      if ($("#dur_auto_note")) $("#dur_auto_note").style.display = isAuto ? "" : "none";
-      if ($("#dur_custom_steps")) $("#dur_custom_steps").style.display = isAuto ? "none" : "";
+      const autoBox = $("#dur_auto_box");
+      const customSteps = $("#dur_custom_steps");
+      if (autoBox) autoBox.style.display = isAuto ? "" : "none";
+      if (customSteps) customSteps.style.display = isAuto ? "none" : "";
     }
     return;
   }
@@ -1488,18 +1515,18 @@ document.addEventListener("keydown", e => {
 });
 const targetCreator = () => creatorId() || $("#o_creator")?.value || "";
 function jobOptions() {
-  const n = id => { const v = $(id).value; return v === "" ? null : Number(v); };
+  const n = id => { const el = $(id); if (!el) return null; const v = el.value; return (v === "" || v === undefined) ? null : Number(v); };
   const autoDur = $("#o_dur_mode") ? $("#o_dur_mode").value === "auto" : true;
   const o = {
-    max_clips: n("#o_max"),
+    max_clips: n("#o_max") || 6,
     auto_duration: autoDur,
-    min_len: autoDur ? 10 : n("#o_min"),
-    max_len: autoDur ? 90 : n("#o_maxlen"),
+    min_len: autoDur ? 10 : (n("#o_min") || 15),
+    max_len: autoDur ? 90 : (n("#o_maxlen") || 60),
     captions: $("#o_captions") ? $("#o_captions").checked : true,
     show_hook: $("#o_show_hook") ? $("#o_show_hook").checked : true,
-    style: $("#o_style").value,
-    layout: $("#o_layout").value,
-    quality: n("#o_quality")
+    style: $("#o_style")?.value || "bounce",
+    layout: $("#o_layout")?.value || "blur",
+    quality: n("#o_quality") || 720
   };
   if (n("#o_from") !== null) o.range_start = n("#o_from") * 60;
   if (n("#o_to") !== null) o.range_end = n("#o_to") * 60;
