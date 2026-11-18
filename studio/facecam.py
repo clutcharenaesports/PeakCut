@@ -127,7 +127,7 @@ def _stillness(frames: np.ndarray) -> np.ndarray:
     return frames.astype(np.float32).std(axis=0)
 
 
-def _plausible(x0, y0, x1, y1, still, light, game, share=STILL_SHARE):
+def _plausible(x0, y0, x1, y1, still, light, game, share=STILL_SHARE, max_frac=STILL_FRAC):
     """Could this rectangle be a webcam picture? Judged on its shape, its stillness and its light.
 
     Returns how much it moves, or None. Nothing here says which corner it is in: a webcam may sit in a
@@ -143,7 +143,7 @@ def _plausible(x0, y0, x1, y1, still, light, game, share=STILL_SHARE):
     inside = still[b:d, a:c]
     if not inside.size:
         return None
-    cut = max(STILL_MIN, STILL_FRAC * game)
+    cut = max(STILL_MIN, max_frac * game)
     moving = float(np.median(inside))
     if moving > cut:
         return None                    # it changes with the game: it is the game
@@ -264,7 +264,7 @@ def _corner(x0, y0, x1, y1, w, h) -> str:
     return "middle"
 
 
-def _finish(path: str | Path, found: dict, w: int, h: int, still: np.ndarray) -> dict | None:
+def _finish(path: str | Path, found: dict, w: int, h: int, still: np.ndarray, model_hinted: bool = False) -> dict | None:
     """The box in source pixels, with how sure it is that this is really a camera."""
     snapped = _snap(path, (found["x"], found["y"], found["x1"], found["y1"]), w, h)
     if not snapped:
@@ -275,8 +275,8 @@ def _finish(path: str | Path, found: dict, w: int, h: int, still: np.ndarray) ->
     inside = still[int(found["y"]):int(found["y1"]), int(found["x"]):int(found["x1"])]
     game = float(np.median(still))
     moving = float(np.median(inside)) if inside.size else 99.0
-    # sure of it when the picture inside hardly moves while the game around it is racing
-    conf = "high" if moving <= max(3.0, 0.25 * game) else "low"
+    # sure of it when the picture inside hardly moves while the game around it is racing, or verified by AI model
+    conf = "high" if (model_hinted or moving <= max(3.0, 0.25 * game)) else "low"
     return {"x": int(round(x0)), "y": int(round(y0)), "w": int(round(x1 - x0)), "h": int(round(y1 - y0)),
             "corner": _corner(x0, y0, x1, y1, w, h), "score": found.get("score", 0.0), "conf": conf}
 
@@ -312,18 +312,17 @@ def _seen(path: str | Path, box, w: int, h: int, still: np.ndarray, light: np.nd
     its box is only believed where the borders are really there and the picture inside really is still."""
     fx, fy, fw, fh = box
     snapped = _snap(path, (fx * W, fy * H, (fx + fw) * W, (fy + fh) * H), w, h, span=0.12)
-    if not snapped:
-        return None
-    x0, y0, x1, y1 = snapped
-    if x1 - x0 < w * MIN_SIZE or y1 - y0 < h * MIN_SIZE:
-        return None
+    if snapped and (snapped[2] - snapped[0] >= w * MIN_SIZE and snapped[3] - snapped[1] >= h * MIN_SIZE):
+        x0, y0, x1, y1 = snapped
+    else:
+        x0, y0, x1, y1 = fx * w, fy * h, (fx + fw) * w, (fy + fh) * h
     small = (x0 * W / w, y0 * H / h, x1 * W / w, y1 * H / h)
     # The model has already said a person is here, so the picture inside is allowed to move more than a
     # measured box would be; what it may not be is the game itself.
-    if _plausible(*small, still, light, float(np.median(still)), share=1.0) is None:
+    if _plausible(*small, still, light, float(np.median(still)), share=1.0, max_frac=0.85) is None:
         return None
     found = {"x": small[0], "y": small[1], "x1": small[2], "y1": small[3], "score": 0.0}
-    return _finish(path, found, w, h, still)
+    return _finish(path, found, w, h, still, model_hinted=True)
 
 
 def detect(path: str | Path, ask=None) -> dict | None:
@@ -358,7 +357,7 @@ def detect(path: str | Path, ask=None) -> dict | None:
         # matches none of them is its own box measured and used.
         match = max(found, key=lambda c: _overlap(c, hinted)) if found else None
         if match and _overlap(match, hinted) >= MATCH:
-            return _finish(path, match, w, h, still)
+            return _finish(path, match, w, h, still, model_hinted=True)
         seen = _seen(path, hinted, w, h, still, light)
         if seen:
             return seen

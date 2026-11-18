@@ -383,6 +383,10 @@ def render_one(job, clip, words):
     clip["status"] = "rendering"
     save(job)
     try:
+        if clip.get("layout") in ("gameplay", "gaming_split") and not clip.get("facecam"):
+            face = _facecam(job)
+            if face:
+                clip["facecam"] = face
         if not clip.get("src") and not job.get("source_path"):
             _piece_again(job, clip)
         off = clip.get("src_offset", 0.0)
@@ -538,6 +542,8 @@ def _facecam(job) -> list | None:
     put a picture of a scoreboard in the corner of the clip. One frame is also shown to
     the AI, which tells a person from a game character better than any measurement can;
     what it says is measured again on the picture, so it cannot do any harm."""
+    if job.get("facecam"):
+        return job["facecam"]
     path = job.get("source_path")
     if not path or not Path(path).is_file():
         return None
@@ -548,6 +554,8 @@ def _facecam(job) -> list | None:
     if not box or box.get("conf") != "high":
         return None
     job["facecam"] = [box["x"], box["y"], box["w"], box["h"]]
+    if job.get("dir"):
+        save(job)
     return job["facecam"]
 
 

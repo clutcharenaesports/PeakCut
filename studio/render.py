@@ -276,8 +276,8 @@ def _filter(layout, fg_h, facecam=None):
             cam_filter = (f"[cam_raw]crop={fw}:{fh}:{fx}:{fy},"
                           f"scale={W}:{cam_h}:force_original_aspect_ratio=increase,crop={W}:{cam_h},setsar=1[top_cam];")
         else:
-            # Fallback when no facecam detected: crop top-right streamer area
-            cam_filter = f"[cam_raw]scale=iw*1.2:ih*1.2,crop={W}:{cam_h}:iw-{W}:0,setsar=1[top_cam];"
+            # Fallback when no facecam detected: crop top-right streamer area with high zoom
+            cam_filter = f"[cam_raw]crop=iw*0.35:ih*0.35:iw*0.65:0,scale={W}:{cam_h}:force_original_aspect_ratio=increase,crop={W}:{cam_h},setsar=1[top_cam];"
         
         return (f"[0:v]fps={config.OUT_FPS},split=2[cam_raw][game_raw];"
                 f"{cam_filter}"
