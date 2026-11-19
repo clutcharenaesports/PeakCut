@@ -109,7 +109,7 @@ _lock = threading.RLock()
 on_clip_ready: list = []   # callbacks (job, clip), run once when a clip first finishes
 
 DEFAULTS = {"max_clips": 6, "min_len": 15, "max_len": 60, "auto_duration": True, "style": "bounce", "layout": "blur", "quality": 720,
-            "range_start": None, "range_end": None, "captions": True, "show_hook": True}
+            "range_start": None, "range_end": None, "captions": True, "show_hook": True, "auto_post": False, "auto_post_accounts": []}
 
 
 LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080)}
@@ -119,10 +119,14 @@ def clean_options(options) -> dict:
     """Only known settings, each inside its allowed range. Raises ValueError on nonsense."""
     out = {}
     for k, v in (options if isinstance(options, dict) else {}).items():
-        if k in ("captions", "auto_duration", "show_hook"):
+        if k in ("captions", "auto_duration", "show_hook", "auto_post"):
             if not isinstance(v, bool):
                 raise ValueError(f"{k} must be on or off.")
             out[k] = v
+            continue
+        if k == "auto_post_accounts":
+            if isinstance(v, list):
+                out[k] = [str(x).strip() for x in v if str(x).strip()][:20]
             continue
         if k not in DEFAULTS or v in ("", None):
             continue
@@ -374,6 +378,7 @@ def request_render(jid, cid, changes: dict, clone: bool = False):
             face = _facecam(job)
             if face:
                 new["facecam"] = face
+            new["facecam_source"] = job.get("facecam_source", "detected" if face else "fallback")
 
     if clone or changes.get("clone"):
         existing_ids = {c["id"] for c in job["clips"]}
@@ -433,6 +438,7 @@ def more_clips(jid, count=None, options=None):
 
     existing_ids = {c["id"] for c in job["clips"]}
     face = _facecam(job) if o["layout"] in ("gameplay", "gaming_split", "gaming_split_inv") else None
+    f_src = job.get("facecam_source", "detected" if face else "fallback")
 
     new_clips = []
     for c in novel:
@@ -446,6 +452,7 @@ def more_clips(jid, count=None, options=None):
                  status="queued", version=0)
         if face:
             c["facecam"] = face
+        c["facecam_source"] = f_src
         job["clips"].append(c)
         new_clips.append(c)
         _q.put(("clip", jid, cid))
@@ -459,10 +466,15 @@ def render_one(job, clip, words):
     clip["status"] = "rendering"
     save(job)
     try:
-        if clip.get("layout") in ("gameplay", "gaming_split", "gaming_split_inv") and not clip.get("facecam"):
-            face = _facecam(job)
-            if face:
-                clip["facecam"] = face
+        if clip.get("layout") in ("gameplay", "gaming_split", "gaming_split_inv"):
+            if not clip.get("facecam"):
+                face = _facecam(job)
+                if face:
+                    clip["facecam"] = face
+                clip["facecam_source"] = job.get("facecam_source", "detected" if face else "fallback")
+            elif not clip.get("facecam_source"):
+                c_data = creators.get(job.get("creator"))
+                clip["facecam_source"] = "manual" if (c_data and c_data.get("facecam")) else "detected"
         if not clip.get("src") and not job.get("source_path"):
             _piece_again(job, clip)
         off = clip.get("src_offset", 0.0)
@@ -612,24 +624,39 @@ def _covers(words: list, start: float, end: float) -> bool:
 
 
 def _facecam(job) -> list | None:
-    """Where the webcam is in the source: once for the whole video, for every clip of it.
+    """Where the webcam is in the source. Sets job['facecam_source'] ('manual', 'detected', or 'fallback')."""
+    c = creators.get(job.get("creator"))
+    if c and c.get("facecam"):
+        w = int(job.get("width") or 1920)
+        h = int(job.get("height") or 1080)
+        fx, fy, fw, fh = c["facecam"]
+        box = [int(round(fx * w)), int(round(fy * h)), int(round(fw * w)), int(round(fh * h))]
+        job["facecam"] = box
+        job["facecam_source"] = "manual"
+        if job.get("dir"):
+            save(job)
+        return box
 
-    Only a sure answer is used. A box that is a scoreboard drawn over the game would
-    put a picture of a scoreboard in the corner of the clip. One frame is also shown to
-    the AI, which tells a person from a game character better than any measurement can;
-    what it says is measured again on the picture, so it cannot do any harm."""
     if job.get("facecam"):
+        job.setdefault("facecam_source", "detected")
         return job["facecam"]
+
     path = job.get("source_path")
     if not path or not Path(path).is_file():
+        job["facecam_source"] = "fallback"
         return None
+
     try:
         box = facecam.detect(path, ask=brain.look_for_facecam)
-    except Exception:  # noqa: BLE001 - a missing facecam is not a failure
-        return None
+    except Exception:  # noqa: BLE001
+        box = None
+
     if not box or box.get("conf") != "high":
+        job["facecam_source"] = "fallback"
         return None
+
     job["facecam"] = [box["x"], box["y"], box["w"], box["h"]]
+    job["facecam_source"] = "detected"
     if job.get("dir"):
         save(job)
     return job["facecam"]
@@ -829,12 +856,59 @@ def _run_job(job):
         s0 = int((a - lo) / 16000)
         min_l = 10 if o.get("auto_duration") else int(o["min_len"])
         max_l = 90 if o.get("auto_duration") else int(o["max_len"])
-        found, ai = brain.find_clips(bw, db[s0: s0 + int((b - a) / 16000) + 1], (b - a) / 16000, job["title"],
-                                     job["uploader"], quota, min_l, max_l, notes.append, game=game)
-        tokens += ai.get("tokens", 0)
-        model = ai.get("model") or model
-        if ai.get("note"):
-            notes.append(ai["note"])
+        if ai.provider() == "muse":
+            z_blk = brain.loud_zscore(db[s0: s0 + int((b - a) / 16000) + 1])
+            z_stats = {"max": float(np.max(z_blk)) if len(z_blk) else 0.0, "mean": float(np.mean(z_blk)) if len(z_blk) else 0.0}
+            req_data = {
+                "job_id": job["id"],
+                "creator": job.get("creator"),
+                "game": game,
+                "video_title": job.get("title", ""),
+                "start": shift,
+                "end": shift + (b - a) / 16000,
+                "words": bw,
+                "loudness": z_stats,
+                "decision_needed": f"Pick up to {quota} viral clips ({min_l}-{max_l}s) from this video block",
+            }
+            req_id = ai.write_bridge_request("video_pick", req_data)
+            _set(job, stage=f"Awaiting Muse (req: {req_id})", status="running", awaiting_muse=req_id)
+            notes.append(f"Waiting for Muse bridge verdict ({req_id})...")
+            wait_start = time.time()
+            verdict = None
+            while time.time() - wait_start < 480:
+                verdict = ai.consume_bridge_verdict(req_id)
+                if verdict is not None:
+                    break
+                time.sleep(1)
+            if verdict and verdict.get("accept"):
+                notes.append(f"Muse accepted candidate: score {verdict.get('score', 85)}")
+                s_ver, e_ver = float(verdict.get("start", shift)), float(verdict.get("end", shift + 30))
+                score_ver = int(verdict.get("score", 85))
+                c_item = brain._tidy({
+                    "start": s_ver, "end": e_ver, "score": score_ver,
+                    "category": verdict.get("category", "other"),
+                    "hook": verdict.get("hook") or "MUSE CLIP",
+                    "title": verdict.get("title") or f"{game or 'Gaming'} Moment",
+                    "description": verdict.get("description", ""),
+                    "hashtags": verdict.get("tags") or verdict.get("hashtags") or [],
+                    "reason": f"Judged by Muse agent ({verdict.get('reason', 'accepted')})"
+                }, s_ver, e_ver, game=game)
+                found = [c_item]
+                ai_res = {"model": "muse", "tokens": 0, "note": "Judged by Muse agent"}
+            else:
+                if not verdict:
+                    notes.append("Muse timed out after 8 minutes; falling back to smart offline scout.")
+                found = brain.smart_offline_scout(bw, db[s0: s0 + int((b - a) / 16000) + 1],
+                                                  (b - a) / 16000, job["title"], job["uploader"],
+                                                  quota, min_l, max_l, game=game)
+                ai_res = {"model": "scout", "tokens": 0, "note": "Smart offline scout"}
+        else:
+            found, ai_res = brain.find_clips(bw, db[s0: s0 + int((b - a) / 16000) + 1], (b - a) / 16000, job["title"],
+                                             job["uploader"], quota, min_l, max_l, notes.append, game=game)
+        tokens += ai_res.get("tokens", 0)
+        model = ai_res.get("model") or model
+        if ai_res.get("note"):
+            notes.append(ai_res["note"])
         if found and statics:
             # A commercial or a "be right back" slate is not a clip. Any clip that sits mostly inside one
             # is dropped.
@@ -847,6 +921,7 @@ def _run_job(job):
                 else:
                     keep.append(c)
             found = keep
+        f_src = "fallback"
         for c in found:
             c.update(id=f"clip{len(job['clips']) + 1:02d}", start=round(c["start"] + shift, 2),
                      end=round(c["end"] + shift, 2), style=o["style"], layout=o["layout"],
@@ -855,8 +930,10 @@ def _run_job(job):
             # stream with no webcam is not looked for again on every clip of it.
             if o["layout"] in ("gameplay", "gaming_split", "gaming_split_inv") and face is False:
                 face = _facecam(job)
+                f_src = job.get("facecam_source", "detected" if face else "fallback")
             if face:
                 c["facecam"] = face
+            c["facecam_source"] = f_src if face is not False else "fallback"
             job["clips"].append(c)
             futures.append((renders.submit(ctx.bind(make), c, list(words)), c))
         job["ai"] = {"model": model, "tokens": tokens, "note": "", "log": notes[-5:]}

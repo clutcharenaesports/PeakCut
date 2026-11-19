@@ -175,9 +175,11 @@ def make_lines(words, loud=None, chat=None):
 
 
 def loud_zscore(db):
-    if len(db) < 5:
-        return np.zeros(len(db))
-    return (db - np.median(db)) / (db.std() + 1e-6)
+    arr = np.asarray(db, dtype=np.float32)
+    if len(arr) < 5:
+        return np.zeros(len(arr), dtype=np.float32)
+    s = float(arr.std())
+    return (arr - float(np.median(arr))) / (s + 1e-6)
 
 
 def ask_ai(prompt, schema=None, purpose="AI call", timeout=None):
@@ -242,23 +244,233 @@ def _snap(clip, lines, words, min_len, max_len, duration):
     return round(max(0.0, s - 0.15), 2), round(min(duration, e + tail), 2)
 
 
-def fallback_by_loudness(db, words, n, max_len, duration):
-    """No AI available: take the loudest stretches that contain speech."""
-    z = loud_zscore(db)
-    picks, order = [], np.argsort(-z)
-    for sec in order:
-        s = max(0.0, float(sec) - max_len * 0.6)
-        e = min(duration, s + max_len)
-        if any(not (e <= p["start"] or s >= p["end"]) for p in picks):
+BOOST_KEYWORDS_EN = {
+    "holy", "what", "no way", "oh my god", "omg", "insane", "clutch", "headshot",
+    "kill", "die", "died", "dead", "run", "help", "gg", "w", "l", "hacker", "aimbot",
+    "lets go", "dude", "crazy", "fail", "win", "glitch", "shut up", "watch this",
+    "look at", "got him", "one shot", "unreal", "wow", "screaming", "bro", "shot"
+}
+BOOST_KEYWORDS_HINGLISH = {
+    "bhai", "yaar", "arre", "kya", "mar gaya", "op", "khatam", "bach gaya",
+    "chal", "dekh", "rok", "baap re", "sahi hai", "are", "aisa", "maro", "gaya"
+}
+ALL_BOOST_KEYWORDS = BOOST_KEYWORDS_EN | BOOST_KEYWORDS_HINGLISH
+
+
+def _is_asr_gibberish(text: str) -> bool:
+    """Check if extracted hook text is ASR hallucination or gibberish."""
+    if not text or len(text.strip()) < 3:
+        return True
+    cleaned = re.sub(r"[^a-zA-Z\s]", "", text).strip()
+    if len(cleaned) < 3:
+        return True
+    words = cleaned.split()
+    if not words:
+        return True
+    if len(set(words)) == 1 and len(words) > 2:
+        return True
+    return False
+
+
+def _extract_hook_from_words(cand_words: list, game=None, title="", peak_t=None) -> str:
+    """Extract a punchy 2-5 word hook from transcript words nearest peak_t, or context fallback."""
+    if peak_t is not None and cand_words:
+        near = [w for w in cand_words if abs(w["s"] - peak_t) <= 4.0]
+        words_to_use = near if len(near) >= 2 else cand_words
+    else:
+        words_to_use = cand_words
+
+    hook = ""
+    if words_to_use:
+        for i in range(len(words_to_use)):
+            for span in (3, 4, 2, 5):
+                if i + span <= len(words_to_use):
+                    chunk = words_to_use[i:i + span]
+                    phrase = " ".join(re.sub(r"[^\w']", "", w["w"]) for w in chunk).strip()
+                    lower_phrase = phrase.lower()
+                    if any(kw in lower_phrase for kw in ALL_BOOST_KEYWORDS):
+                        if not _is_asr_gibberish(phrase):
+                            hook = phrase.upper()
+                            break
+            if hook:
+                break
+        if not hook and len(words_to_use) >= 2:
+            chunk = words_to_use[:min(4, len(words_to_use))]
+            phrase = " ".join(re.sub(r"[^\w']", "", w["w"]) for w in chunk).strip()
+            if not _is_asr_gibberish(phrase):
+                hook = phrase.upper()
+
+    if not hook or _is_asr_gibberish(hook):
+        if game:
+            g_name = games.name_of(game) or str(game)
+            hook = f"{g_name.upper()} CLUTCH"[:30]
+        elif title:
+            t_words = [w for w in re.sub(r"[^\w\s]", "", title).split() if len(w) > 2][:3]
+            hook = " ".join(t_words).upper() if t_words else "INSANE PLAY"
+        else:
+            hook = "INSANE MOMENT"
+
+    parts = hook.split()[:5]
+    return " ".join(parts).upper()
+
+
+def smart_offline_scout(words, db, duration, title="", uploader="", max_clips=6, min_len=15, max_len=60, game=None, chat=None):
+    """Multi-signal offline scout: loudness z-scores, speech rate bursts, silence contrast, and keyword boosts.
+    Calibrates scores from signal percentile distribution (75+ means top moments)."""
+    z = loud_zscore(db) if len(db) else np.zeros(max(1, int(duration) + 1), dtype=np.float32)
+    lines = make_lines(words, z)
+    if not lines and not words:
+        return []
+
+    step = 5.0
+    half_len = (min_len + max_len) / 2.0
+    candidates = []
+
+    t = 0.0
+    while t < duration - min_len:
+        s = t
+        e = min(duration, s + half_len)
+        win_words = [w for w in words if s <= w["s"] <= e]
+        if not win_words and not (chat and any(s <= ct <= e for ct in (chat if isinstance(chat, dict) else []))):
+            t += step
             continue
-        if not any(s <= w["s"] <= e for w in words):
+
+        sec_s, sec_e = int(s), int(e) + 1
+        z_slice = z[sec_s:sec_e] if sec_s < len(z) else np.zeros(1)
+        z_max = float(np.max(z_slice)) if len(z_slice) else 0.0
+        z_mean = float(np.mean(z_slice)) if len(z_slice) else 0.0
+        peak_t = s + (float(np.argmax(z_slice)) if len(z_slice) else 0.0)
+
+        dur_span = max(1.0, e - s)
+        wps = len(win_words) / dur_span
+        density_score = min(3.0, wps) / 3.0
+
+        pause_score = 0.0
+        if len(win_words) >= 2:
+            gaps = [win_words[i+1]["s"] - win_words[i]["e"] for i in range(len(win_words)-1)]
+            if any(g > 0.8 for g in gaps):
+                pause_score = 1.0
+
+        text_lower = " ".join(w["w"].lower() for w in win_words)
+        kw_count = sum(1 for kw in ALL_BOOST_KEYWORDS if kw in text_lower)
+        kw_score = min(1.0, kw_count * 0.4)
+
+        chat_score = 0.0
+        if chat:
+            if isinstance(chat, list):
+                if chat and isinstance(chat[0], (int, float)):
+                    c_slice = chat[sec_s:sec_e] if sec_s < len(chat) else []
+                    chat_score = min(1.0, sum(c_slice) / max(1.0, len(c_slice) * 5.0))
+                else:
+                    c_text = " ".join(str(m).lower() for m in chat)
+                    c_hits = sum(1 for kw in ALL_BOOST_KEYWORDS if kw in c_text)
+                    if any(w in c_text for w in ("clip", "omg", "lol", "lmao", "wtf", "bhai")):
+                        c_hits += 2
+                    chat_score = min(1.0, c_hits * 0.25)
+            elif isinstance(chat, dict):
+                c_hits = sum(chat.get(sec, 0) for sec in range(sec_s, sec_e))
+                chat_score = min(1.0, c_hits / 10.0)
+
+        raw_energy = (
+            0.40 * max(0.0, z_max) +
+            0.20 * max(0.0, z_mean) +
+            0.20 * (density_score * 3.0) +
+            0.15 * (kw_score * 3.0) +
+            0.05 * pause_score +
+            0.20 * chat_score
+        )
+
+        candidates.append({
+            "start": s, "end": e, "raw_energy": raw_energy, "peak_t": peak_t,
+            "win_words": win_words, "kw_count": kw_count, "text_lower": text_lower
+        })
+        t += step
+
+    if not candidates:
+        return []
+
+    energies = [c["raw_energy"] for c in candidates]
+    p50 = float(np.percentile(energies, 50))
+    p80 = float(np.percentile(energies, 80))
+    p95 = float(np.percentile(energies, 95)) if len(energies) > 5 else max(energies)
+    max_e = max(energies) if max(energies) > 0 else 1.0
+
+    candidates.sort(key=lambda c: -c["raw_energy"])
+
+    picks = []
+    for c in candidates:
+        s, e = c["start"], c["end"]
+        if lines:
+            s_snap, e_snap = _snap({"start": s, "end": e}, lines, words, min_len, max_len, duration)
+            if e_snap - s_snap >= min_len - 1:
+                s, e = s_snap, e_snap
+
+        if _overlaps(s, e, picks):
             continue
-        picks.append({"start": s, "end": e, "score": 50, "category": "other", "hook": "WAIT FOR IT",
-                      "title": "Loud moment", "description": "", "hashtags": [], "highlight_words": [],
-                      "reason": "Picked by loudness because the AI was unavailable."})
-        if len(picks) >= n:
+
+        raw = c["raw_energy"]
+        if raw >= p95:
+            score = int(85 + 10 * ((raw - p95) / (max_e - p95 + 1e-6)))
+        elif raw >= p80:
+            score = int(75 + 9 * ((raw - p80) / (p95 - p80 + 1e-6)))
+        elif raw >= p50:
+            score = int(60 + 14 * ((raw - p50) / (p80 - p50 + 1e-6)))
+        else:
+            score = int(45 + 14 * (raw / (p50 + 1e-6)))
+        score = max(40, min(95, score))
+
+        hook = _extract_hook_from_words(c["win_words"], game=game, title=title, peak_t=c["peak_t"])
+        g_name = games.name_of(game) or str(game) if game else ""
+        if g_name:
+            c_title = f"{hook} | {g_name}"[:70]
+        elif title:
+            c_title = f"{hook} | {title[:40]}"[:70]
+        else:
+            c_title = f"{hook} 😱"[:70]
+
+        txt = c["text_lower"]
+        if any(w in txt for w in ("clutch", "headshot", "kill", "win")):
+            cat = "clutch"
+        elif any(w in txt for w in ("die", "died", "dead", "fail", "glitch")):
+            cat = "fail"
+        elif any(w in txt for w in ("holy", "what", "no way", "oh my god", "omg", "insane")):
+            cat = "shock"
+        elif any(w in txt for w in ("bhai", "yaar", "arre", "dude", "crazy", "lol")):
+            cat = "funny"
+        else:
+            cat = "other"
+
+        desc = f"Unbelievable moment from {title or g_name or 'the stream'}: {hook.lower()}!"[:300]
+        highlights = [w["w"] for w in c["win_words"] if w["w"].lower() in ALL_BOOST_KEYWORDS][:4]
+
+        picks.append(_tidy({
+            "start": s, "end": e, "score": score, "category": cat,
+            "hook": hook, "title": c_title, "description": desc,
+            "highlight_words": highlights,
+            "reason": f"Discovered by smart offline scout (energy: {raw:.1f}, score: {score})"
+        }, s, e, game=game))
+
+        if len(picks) >= max_clips:
             break
+
+    picks.sort(key=lambda p: p["start"])
     return picks
+
+
+def fallback_by_loudness(db, words, n, max_len, duration, game=None, title="", uploader=""):
+    """Legacy compatibility wrapper around smart_offline_scout."""
+    return smart_offline_scout(words, db, duration, title=title, uploader=uploader,
+                               max_clips=n, min_len=15, max_len=max_len, game=game)
+
+
+def scout_live_moment(win_words, z, ws, now, title="", uploader="", min_len=15, max_len=60, game=None, chat=None):
+    """Offline scout evaluation for one live window/spike. Returns (clips, 0)."""
+    if not win_words and not chat:
+        return [], 0
+    dur = max(now, ws + max_len)
+    clips = smart_offline_scout(win_words, z, dur, title=title, uploader=uploader,
+                                max_clips=1, min_len=min_len, max_len=max_len, game=game, chat=chat)
+    return clips, 0
 
 
 def _game_rules(game):
@@ -298,8 +510,9 @@ def find_clips(words, db, duration, title="", uploader="", max_clips=6, min_len=
             log(f"AI window {a:.0f}-{b:.0f}s failed: {e}")
     note = ""
     if not used_model:
-        found = fallback_by_loudness(db, words, max_clips, max_len, duration)
-        note = "The AI was unavailable, so clips were picked by loudness only."
+        found = smart_offline_scout(words, db, duration, title=title, uploader=uploader,
+                                    max_clips=max_clips, min_len=min_len, max_len=max_len, game=game)
+        note = "Clips were picked by the smart offline scout (no AI key)."
     clips = []
     for c in sorted(found, key=lambda c: -_num(c.get("score"))):
         s, e = _snap(c, lines, words, min_len, max_len, duration)

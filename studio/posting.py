@@ -48,7 +48,7 @@ def _mirror(p):
     job = jobs.get(p["job"])
     clip = next((c for c in job["clips"] if c["id"] == p["clip"]), None) if job else None
     if clip is not None:
-        clip.setdefault("posts", {})[p["id"]] = {k: p.get(k) for k in ("account_name", "platform", "status", "url", "due_at", "error")}
+        clip.setdefault("posts", {})[p["id"]] = {k: p.get(k) for k in ("account_name", "platform", "status", "url", "due_at", "error", "note")}
         jobs.save(job)
 
 
@@ -90,14 +90,35 @@ def enqueue(job, clip, account_ids, now=False) -> list:
 
 def on_clip_ready(job, clip):
     """Called once when a clip first finishes rendering."""
-    c = creators.get(job["creator"])
-    if not c or not c["autopost"] or not c["accounts"]:
+    c = creators.get(job.get("creator"))
+    o = job.get("options") or {}
+    autopost_enabled = bool(o.get("auto_post") or (c and c.get("autopost")) or config.AUTO_POST)
+    if not autopost_enabled:
         return
-    if clip.get("score", 0) < c["post_min_score"]:
-        return  # includes hand-made clips (score 0): those wait for you to press Post
-    made = enqueue(job, clip, c["accounts"])
+
+    # Respect honest score quality gates
+    min_score = int(c.get("post_min_score", 75) if c else o.get("post_min_score", 75))
+    if clip.get("score", 0) < min_score:
+        return
+
+    # Target account selection
+    accs = o.get("auto_post_accounts") or (c.get("accounts") if c else None)
+    if accs:
+        target_accounts = [str(a) for a in accs if a]
+    else:
+        # Safe default: post ONLY to connected YouTube accounts! Never silently to every platform.
+        all_accs = accounts.list_accounts()
+        target_accounts = [a["id"] for a in all_accs if a.get("platform") == "youtube"]
+        if not target_accounts:
+            alerts.log(f"Auto-post for clip '{clip.get('title') or clip.get('id')}' skipped: no connected YouTube account.")
+            return
+
+    # Route through standard posting queue with now=False so post_gap_min and daily_cap apply
+    made = enqueue(job, clip, target_accounts, now=False)
     if made:
-        creators.log(c["id"], f"Queued for {len(made)} account(s): {clip.get('title') or clip.get('hook')}")
+        msg = f"Auto-post queued for {len(made)} account(s): {clip.get('title') or clip.get('hook')}"
+        if c:
+            creators.log(c["id"], msg)
 
 
 def _caption(clip, creator):
@@ -130,7 +151,9 @@ def _post(p):
         creator = creators.get(job["creator"]) or dict(creators.DEFAULTS, name="clips")
         title, cap = clip.get("title") or clip.get("hook") or "Clip", _caption(clip, creator)
         if acc["platform"] == "youtube":
-            rid, url = accounts.youtube_upload(acc, path, title, cap + "\n\n#Shorts", clip.get("hashtags", []), creator["privacy"])
+            privacy = creator.get("privacy", "private")
+            rid, url = accounts.youtube_upload(acc, path, title, cap + "\n\n#Shorts", clip.get("hashtags", []), privacy)
+            p["note"] = f"Uploaded ({privacy.capitalize()}) - personal Google OAuth apps are private by default"
         elif acc["platform"] == "instagram":
             rid, url = accounts.instagram_upload(acc, path, f"{title}\n\n{cap}", job["id"])
         elif acc["platform"] == "tiktok":

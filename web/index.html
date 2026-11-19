@@ -1422,6 +1422,7 @@ function drawAdd(variant) {
         </div>
         <div class="ob-foot">
           <label class="sw-row"><input type="checkbox" id="o_show_hook" ${c?.show_hook === false ? "" : "checked"}><span>Show title on video</span><small>Overlay headline hook text at the top of the clip</small></label>
+          <label class="sw-row"><input type="checkbox" id="o_auto_post"><span>Auto-post to YouTube</span><small>Automatically queue finished clips to connected YouTube Shorts account</small></label>
         </div>
       </div>
       <div class="ob"><div class="ot cap-head"><span id="o_style_label">Caption style</span>
@@ -1529,6 +1530,7 @@ function jobOptions() {
     show_hook: $("#o_show_hook") ? $("#o_show_hook").checked : true,
     style: $("#o_style")?.value || "bounce",
     layout: $("#o_layout")?.value || "blur",
+    auto_post: $("#o_auto_post") ? $("#o_auto_post").checked : false,
     quality: n("#o_quality") || 720
   };
   if (n("#o_from") !== null) o.range_start = n("#o_from") * 60;
@@ -1770,7 +1772,9 @@ function clipHtml(j, c) {
   const key = `c:${j.id}:${c.id}`, busyClip = c.status === "queued" || c.status === "rendering";
   return `<article class="clip ${sel().has(key) ? "picked" : ""}">
     <button class="shot" data-act="openclip" ${a} aria-label="Open clip: ${esc(c.title || c.hook)}">${body}
-      <span class="badge l ${scoreCls(c.score)}" title="AI score">${c.score || "Hand"}</span><span class="badge r">${fmt(c.end - c.start)}</span></button>
+      <span class="badge l ${scoreCls(c.score)}" title="AI score">${c.score || "Hand"}</span>
+      ${c.facecam_source ? `<span class="badge" style="position:absolute;top:6px;right:6px;z-index:2;font-size:10px;background:rgba(0,0,0,0.65)" title="Facecam: ${c.facecam_source}">${c.facecam_source === 'manual' ? 'FC:man' : c.facecam_source === 'detected' ? 'FC:ai' : 'FC:crop'}</span>` : ""}
+      <span class="badge r">${fmt(c.end - c.start)}</span></button>
     <div class="clip-body">
       <div class="hook">${esc(c.hook || "Untitled clip")}</div>
       <div class="ttl">${esc(c.title)}</div>
@@ -1950,7 +1954,17 @@ function drawCreatorForm() {
         <label class="f">Shortest clip (seconds)<input data-k="min_len" type="number" value="${c.min_len}"></label>
         <label class="f">Longest clip (seconds)<input data-k="max_len" type="number" value="${c.max_len}"></label>
         <label class="f">Clips per video<input data-k="max_clips" type="number" value="${c.max_clips}"></label>
-        <label class="f">Minutes of live stream to keep<input data-k="buffer_min" type="number" value="${c.buffer_min}"></label></div></div>
+        <label class="f">Minutes of live stream to keep<input data-k="buffer_min" type="number" value="${c.buffer_min}"></label>
+        <div class="f span">
+          <b>Facecam box (manual override for gaming layouts)</b>
+          <small class="sub" style="font-weight:400">Fixed facecam region in percent coordinates (0-100%). Leave blank to auto-detect.</small>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <label style="flex:1">X %<input id="fc_x" type="number" min="0" max="100" step="0.1" value="${c.facecam ? Math.round(c.facecam[0]*1000)/10 : ''}"></label>
+            <label style="flex:1">Y %<input id="fc_y" type="number" min="0" max="100" step="0.1" value="${c.facecam ? Math.round(c.facecam[1]*1000)/10 : ''}"></label>
+            <label style="flex:1">Width %<input id="fc_w" type="number" min="0" max="100" step="0.1" value="${c.facecam ? Math.round(c.facecam[2]*1000)/10 : ''}"></label>
+            <label style="flex:1">Height %<input id="fc_h" type="number" min="0" max="100" step="0.1" value="${c.facecam ? Math.round(c.facecam[3]*1000)/10 : ''}"></label>
+          </div>
+        </div></div></div>
     <div class="card"><h2>Posting</h2><p class="help">${A.length ? "Choose the accounts this creator's clips go to. One account can be shared by several creators." : "No accounts are connected yet. Connect one in Settings, then come back."}</p>
       ${A.length ? `<div class="row" style="margin-bottom:16px">${A.map(a => `<label class="ck"><input type="checkbox" data-acc value="${esc(a.id)}" ${c.accounts.includes(a.id) ? "checked" : ""}>${esc(a.label)} · ${esc(a.name)}</label>`).join("")}</div>` : `<button class="btn" data-act="go" data-v="settings" style="margin-bottom:16px">${ic("cog")}Open Settings</button>`}
       <div class="fields"><label class="sw span"><input type="checkbox" data-k="autopost" ${c.autopost ? "checked" : ""}><span>Post new clips automatically<small>Clips that score high enough go out without you approving them.</small></span></label>
@@ -1964,7 +1978,21 @@ function drawCreatorForm() {
       <button class="btn danger" data-act="delcreator">${ic("trash")}Delete creator</button></div>
     <div class="savebar" id="savebar"><span>${ic("warn")}You have unsaved changes</span><button class="btn ghost" data-act="cdiscard">Discard</button><button class="btn primary" data-act="csave">${ic("check")}Save changes</button></div>`;
 }
-const creatorForm = () => { const d = {}; $$("#cform [data-k]").forEach(i => { if (i.type === "radio") { if (i.checked) d[i.dataset.k] = i.value; } else d[i.dataset.k] = i.type === "checkbox" ? i.checked : i.value; }); d.accounts = $$("#cform [data-acc]:checked").map(i => i.value); return d; };
+const creatorForm = () => {
+  const d = {};
+  $$("#cform [data-k]").forEach(i => {
+    if (i.type === "radio") { if (i.checked) d[i.dataset.k] = i.value; }
+    else d[i.dataset.k] = i.type === "checkbox" ? i.checked : i.value;
+  });
+  d.accounts = $$("#cform [data-acc]:checked").map(i => i.value);
+  const fx = parseFloat($("#fc_x")?.value), fy = parseFloat($("#fc_y")?.value), fw = parseFloat($("#fc_w")?.value), fh = parseFloat($("#fc_h")?.value);
+  if (!isNaN(fx) && !isNaN(fy) && !isNaN(fw) && !isNaN(fh) && fw > 0 && fh > 0) {
+    d.facecam = [Math.max(0, Math.min(1, fx / 100)), Math.max(0, Math.min(1, fy / 100)), Math.max(0, Math.min(1, fw / 100)), Math.max(0, Math.min(1, fh / 100))];
+  } else if ($("#fc_x") && $("#fc_x").value === "") {
+    d.facecam = null;
+  }
+  return d;
+};
 const dirty = on => $("#savebar")?.classList.toggle("on", on);
 async function saveCreator(quiet) {
   try { await send(`/api/creators/${creatorId()}`, creatorForm(), "PUT"); dirty(false); if (!quiet) toast("Saved", "ok"); await tick(); return true; }
@@ -2094,11 +2122,15 @@ const setTabs = () => [
 function aiHints() {
   const k = S.ai, sel = $("#ai_provider"); if (!k || !sel) return;
   const pv = k.providers.find(x => x.id === sel.value) || k.providers[0], same = pv.id === k.provider;
+  const isMuse = pv.id === "muse";
+  if ($("#ai_keywrap")) $("#ai_keywrap").hidden = isMuse;
   $("#ai_key").placeholder = same && k.has_key ? `Saved${k.key_hint ? ", ends in " + k.key_hint : ""}. Paste a new key to replace it` : pv.needs_key ? "Paste your key" : "Not needed";
-  $("#ai_keyhint").innerHTML = pv.key_url ? `${pv.needs_key ? "Get a key at" : "Set it up at"} <a href="${esc(pv.key_url)}" target="_blank" rel="noopener">${esc(pv.key_url.replace("https://", ""))}</a>. The key stays on this server and is never shown again.` : "The key stays on this server and is never shown again.";
+  $("#ai_keyhint").innerHTML = isMuse ? "Muse agent runs locally on this computer via bridge queue. No key required." : pv.key_url ? `${pv.needs_key ? "Get a key at" : "Set it up at"} <a href="${esc(pv.key_url)}" target="_blank" rel="noopener">${esc(pv.key_url.replace("https://", ""))}</a>. The key stays on this server and is never shown again.` : "The key stays on this server and is never shown again.";
+  if ($("#ai_modelwrap")) $("#ai_modelwrap").hidden = isMuse;
   $("#ai_model").placeholder = pv.example ? "For example " + pv.example : "The model id, exactly as the service names it";
   $("#ai_base").placeholder = pv.address || "http://127.0.0.1:1234/v1";
   $("#ai_basewrap").hidden = pv.id !== "custom" && !(same && k.base_url);
+  if ($("#ai_bridgestat")) $("#ai_bridgestat").hidden = !isMuse;
 }
 async function drawSettings() {
   const box = $("#sform"); if (!box) return;
@@ -2111,12 +2143,13 @@ async function drawSettings() {
     if (tab === "ai") {
       const k = S.ai = await api("/api/ai");
       body.innerHTML = `<section class="set-sec"><h2>AI</h2><p class="help">PeakCut uses an AI model to pick the moments worth clipping and to write hooks, titles and captions. Use your own key from any of these services. You pay that service directly. Without a key, clips are picked by loudness.</p>
-          <div class="ai-state">${k.ready ? `<span class="pill ok">${ic("check")}Ready</span><span class="sub">${esc(k.label)} · ${esc(k.models[0] || "")}</span>` : `<span class="pill warn">Not set up</span><span class="sub">Choose a service, paste your key and pick a model.</span>`}</div>
+          <div class="ai-state">${k.ready ? `<span class="pill ok">${ic("check")}Ready</span><span class="sub">${esc(k.label)}${k.models[0] ? " · " + esc(k.models[0]) : ""}</span>` : `<span class="pill warn">Not set up</span><span class="sub">Choose a service, paste your key and pick a model.</span>`}</div>
+          ${k.bridge ? `<div id="ai_bridgestat" class="note" style="margin:10px 0" ${k.provider === 'muse' ? '' : 'hidden'}>${ic("bolt")}<span><b>Muse Bridge Status:</b> ${k.bridge.pending_count} pending request(s)${k.bridge.last_verdict_time ? ' · Last verdict: ' + when(k.bridge.last_verdict_time) : ' · No verdicts yet'}. Queue: <code>data/ai_bridge/</code></span></div>` : ''}
           <div class="ai-form">
             <label class="f">AI service<select id="ai_provider">${k.providers.map(x => `<option value="${esc(x.id)}" ${x.id === k.provider ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</select></label>
-            <label class="f">Key<input id="ai_key" type="password" autocomplete="off" spellcheck="false"><span class="hint" id="ai_keyhint"></span></label>
+            <label class="f" id="ai_keywrap">Key<input id="ai_key" type="password" autocomplete="off" spellcheck="false"><span class="hint" id="ai_keyhint"></span></label>
             <label class="f" id="ai_basewrap">Address<input id="ai_base" value="${esc(k.base_url || "")}" spellcheck="false"><span class="hint">Where the service answers. Only needed for a custom service.</span></label>
-            <label class="f">Model<span class="with"><input id="ai_model" list="ai_models" value="${esc(k.models.join(", "))}" spellcheck="false"><button class="btn" type="button" data-act="aimodels">Find models</button></span>
+            <label class="f" id="ai_modelwrap">Model<span class="with"><input id="ai_model" list="ai_models" value="${esc(k.models.join(", "))}" spellcheck="false"><button class="btn" type="button" data-act="aimodels">Find models</button></span>
               <datalist id="ai_models"></datalist><span class="hint">A fast, inexpensive model is the right choice. Add a second one after a comma to fall back on.</span></label>
           </div>
           <div class="row" style="margin-top:20px"><button class="btn primary" data-act="aisave">Save and test</button>${k.ready ? `<button class="btn" data-act="aitest">Test again</button>` : ""}</div></section>`;
@@ -2226,6 +2259,7 @@ function drawClipDlg(full) {
     dlg.innerHTML = `<div class="editor"><div class="stage" id="stage">${stage}</div>
       <div class="panel">
         <div class="job-head" style="margin:0"><div><span class="badge ${scoreCls(c.score)}" style="position:static">${c.judges ? "Words " + c.judges.words + (c.judges.reaction ? " · Reaction " + c.judges.reaction : "") : c.score ? "Score " + c.score : "Clipped by hand"}</span>
+          ${c.facecam_source ? `<span class="badge" style="position:static;margin-left:6px" title="Facecam source">${c.facecam_source === 'manual' ? 'Facecam: manual' : c.facecam_source === 'detected' ? 'Facecam: detected' : 'Facecam: fallback crop'}</span>` : ""}
           <p class="sub" style="margin-top:8px">${esc(c.reason || "")}</p></div><button class="btn icon ghost" data-act="closedlg" aria-label="Close">${ic("x")}</button></div>
         <h3>On the video</h3>
         <label class="sw"><input type="checkbox" data-f="show_hook" ${c.show_hook === false ? "" : "checked"}>Show title on video</label>

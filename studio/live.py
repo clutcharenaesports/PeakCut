@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import alerts, auth, brain, config, creators, ctx, facecam, games, jobs, load, media, transcribe, usage
+from . import ai, alerts, auth, brain, config, creators, ctx, facecam, games, jobs, load, media, transcribe, usage
 
 # ":username!user@host PRIVMSG #channel :the message"
 _NICK = re.compile(r"(?m)^:([A-Za-z0-9_]{2,25})!")
@@ -156,7 +156,9 @@ class Session:
         self.game = ""                # which game this stream is, when it can be told
         self.facecam_box = None       # where the webcam is, found once the first clip is made
         self.facecam_checked = False  # the look is made once, even when it finds nothing
+        self.facecam_source = None    # "manual" | "detected" | "fallback"
         self.ai_busy = 0.0            # when the AI check now running was started, 0 when none is
+        self.awaiting_muse = {}       # req_id -> candidate data pending Muse bridge verdict
 
     def _ask_ai(self, window=None, why=None):
         """Ask the AI on its own thread, so a slow answer never stops the recording.
@@ -468,19 +470,6 @@ class Session:
             return self._verdict(verdict, f"Skipped: {st['live_per_hour']} clips this hour already")
         usage.set_context(self.job["creator"], self.job["title"] or "Live stream")
         title, up = self.job["title"], self.job["uploader"]
-        try:
-            cands, tok = brain.judge_transcript(win, ws, now, title, up, st["min_len"], st["max_len"], self.job["clips"],
-                                                n=1 if every <= 2 else 2, must=must, game=self._game(),
-                                                timeout=config.LIVE_AI_TIMEOUT)  # Auto (0) asks for one
-        except Exception as e:  # noqa: BLE001
-            self.job["ai"]["last_error"] = str(e)[-200:]
-            return self._verdict(verdict, "AI error: " + str(e)[-80:])
-        self.checks += 1
-        self.tokens += tok
-        keep = [c for c in cands if c["score"] >= (40 if must else st["min_score"])]
-        verdict["transcript"] = max((c["score"] for c in cands), default=0)
-        if not keep:
-            return self._verdict(verdict, "Words judge: nothing clip-worthy")
         z = brain.loud_zscore(np.array(self.db, dtype=np.float32))
         lo, hi = int(ws), int(now) + 1
         people = self.chat_people()
@@ -490,6 +479,58 @@ class Session:
         else:
             chat = [self.chat.get(t, 0) for t in range(lo, hi)] if (self.chat_on or self.chat_total) else None
             unit = "messages"
+
+        # 1. Muse file/queue bridge (default, no key)
+        if ai.provider() == "muse":
+            z_slice = z[lo:hi]
+            z_stats = {"max": float(np.max(z_slice)) if len(z_slice) else 0.0, "mean": float(np.mean(z_slice)) if len(z_slice) else 0.0}
+            recent_chat = [f"{t}: {count}" for t, count in list(self.chat.items())[-10:]] if (self.chat_on or self.chat_total) else []
+            req_data = {
+                "creator": self.job.get("creator"),
+                "game": self._game(),
+                "stream_title": self.job.get("title", ""),
+                "start": ws,
+                "end": now,
+                "words": win,
+                "loudness": z_stats,
+                "chat": recent_chat,
+                "decision_needed": "Judge if this live spike moment is worth clipping into a vertical short",
+                "session_id": self.id,
+            }
+            req_id = ai.write_bridge_request("live_spike", req_data)
+            self.awaiting_muse[req_id] = {
+                "request_id": req_id,
+                "created_at": time.time(),
+                "ws": ws, "now": now, "win": win, "z_slice": z_slice,
+                "chat": chat, "why": why, "verdict": verdict, "st": st
+            }
+            self.checks += 1
+            return self._verdict(verdict, f"Awaiting Muse verdict (id: {req_id})")
+
+        # 2. Key-based provider (Gemini, OpenAI, etc.)
+        cands = None
+        if ai.ready():
+            try:
+                cands, tok = brain.judge_transcript(win, ws, now, title, up, st["min_len"], st["max_len"], self.job["clips"],
+                                                    n=1 if every <= 2 else 2, must=must, game=self._game(),
+                                                    timeout=config.LIVE_AI_TIMEOUT)
+                self.checks += 1
+                self.tokens += tok
+            except Exception as e:  # noqa: BLE001
+                self.job["ai"]["last_error"] = str(e)[-200:]
+                cands = None
+
+        # 3. Smart offline scout fallback (no provider, provider error, or no key)
+        if cands is None:
+            cands, _ = brain.scout_live_moment(win, z[lo:hi], ws, now, title=title, uploader=up,
+                                              min_len=st["min_len"], max_len=st["max_len"],
+                                              game=self._game(), chat=chat)
+            self.checks += 1
+
+        keep = [c for c in cands if c["score"] >= (40 if must else st["min_score"])]
+        verdict["transcript"] = max((c["score"] for c in cands), default=0)
+        if not keep:
+            return self._verdict(verdict, "Words judge: nothing clip-worthy")
         try:
             sig, tok2 = brain.judge_signals(z[lo:hi], chat, lo, now, unit=unit, timeout=config.LIVE_AI_TIMEOUT)
             self.checks += 1
@@ -525,6 +566,49 @@ class Session:
     def _verdict(self, v, result):
         self.verdicts.append(dict(v, result=result))
         del self.verdicts[:-6]
+
+    def resolve_muse_verdict(self, req_id: str, verdict: dict):
+        pending = self.awaiting_muse.pop(req_id, None)
+        if not pending:
+            return
+        if not verdict.get("accept"):
+            self.rejected += 1
+            self._verdict(pending["verdict"], f"Muse rejected moment: {verdict.get('reason', 'rejected')}")
+            return
+        s = float(verdict.get("start", pending["ws"]))
+        e = float(verdict.get("end", pending["now"]))
+        score = int(verdict.get("score", 85))
+        c = brain._tidy({
+            "start": s, "end": e, "score": score,
+            "category": verdict.get("category", "other"),
+            "hook": verdict.get("hook") or "MUSE CLIP",
+            "title": verdict.get("title") or "Muse Live Clip",
+            "description": verdict.get("description", ""),
+            "hashtags": verdict.get("tags") or verdict.get("hashtags") or [],
+            "reason": f"Judged by Muse agent ({verdict.get('reason', 'accepted')})"
+        }, s, e, game=self._game())
+        c["judges"] = {"words": score, "reaction": score, "why": "Muse bridge verdict"}
+        self._add_clip(c)
+        self._verdict(pending["verdict"], f"Clipped: Muse verdict (score {score})")
+
+    def resolve_muse_timeout(self, req_id: str):
+        pending = self.awaiting_muse.pop(req_id, None)
+        if not pending:
+            return
+        st = pending["st"]
+        cands, _ = brain.scout_live_moment(
+            pending["win"], pending["z_slice"], pending["ws"], pending["now"],
+            title=self.job.get("title", ""), uploader=self.job.get("uploader", ""),
+            min_len=st["min_len"], max_len=st["max_len"], game=self._game(), chat=pending["chat"]
+        )
+        if cands and cands[0]["score"] >= st["min_score"]:
+            c = cands[0]
+            c["reason"] = f"{c.get('reason', '')} (Muse timed out, clipped by smart scout)"
+            self._add_clip(c)
+            self._verdict(pending["verdict"], "Clipped: smart scout fallback (Muse timeout)")
+        else:
+            self.rejected += 1
+            self._verdict(pending["verdict"], "Muse timed out; smart scout rejected")
 
     CLIP_WORDS = re.compile(r"\bclip(\s+(it|that|this))?\b", re.I)
     SAID_BEFORE, SAID_AFTER, SAID_GAP = 60, 15, 45
@@ -905,6 +989,26 @@ def _resume_recordings(paused):
         time.sleep(30)
 
 
+def _muse_bridge_loop():
+    """Poll for verdicts from the Muse bridge for any active live sessions.
+    If 8 minutes pass without a verdict, fall back to smart offline scout."""
+    while True:
+        try:
+            now = time.time()
+            for s in list(SESSIONS.values()):
+                if not hasattr(s, "awaiting_muse") or not s.awaiting_muse:
+                    continue
+                for req_id, pending in list(s.awaiting_muse.items()):
+                    verdict = ai.consume_bridge_verdict(req_id)
+                    if verdict:
+                        s.resolve_muse_verdict(req_id, verdict)
+                    elif now - pending.get("created_at", now) >= 480:  # 8 minutes
+                        s.resolve_muse_timeout(req_id)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(3)
+
+
 def start():
     paused = []
     for j in jobs.all_jobs():
@@ -918,3 +1022,4 @@ def start():
     if paused:
         threading.Thread(target=_resume_recordings, args=(paused,), daemon=True).start()
     threading.Thread(target=watch_loop, daemon=True).start()
+    threading.Thread(target=_muse_bridge_loop, daemon=True).start()

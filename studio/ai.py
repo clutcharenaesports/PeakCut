@@ -26,6 +26,7 @@ PROVIDERS = {
     "gemini": ("Gemini", "https://generativelanguage.googleapis.com/v1beta/models", "gemini", "https://aistudio.google.com/apikey", "gemini-2.5-flash"),
     "openai": ("OpenAI", "https://api.openai.com/v1", "openai", "https://platform.openai.com/api-keys", "gpt-4o-mini"),
     "xai": ("Grok", "https://api.x.ai/v1", "openai", "https://console.x.ai", "grok-4"),
+    "muse": ("Muse (agent)", "local://ai_bridge", "bridge", "", "muse"),
     "groq": ("Groq", "https://api.groq.com/openai/v1", "openai", "https://console.groq.com/keys", "llama-3.3-70b-versatile"),
     "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", "openai", "https://openrouter.ai/keys", "google/gemini-2.5-flash"),
     "anthropic": ("Claude", "https://api.anthropic.com/v1", "anthropic", "https://console.anthropic.com", ""),
@@ -33,7 +34,7 @@ PROVIDERS = {
     "custom": ("Custom (OpenAI-compatible)", "", "openai", "", ""),
 }
 ALIASES = {"google": "gemini", "grok": "xai", "claude": "anthropic", "local": "ollama"}
-NO_KEY = {"ollama", "custom"}       # a model running on your own machine needs no key
+NO_KEY = {"muse", "ollama", "custom"}       # muse agent and local models need no key
 
 # ---------------------------------------------------------------- the settings in use
 _lock = threading.Lock()
@@ -64,9 +65,12 @@ def current() -> dict:
     """Provider, models, address and key: what the dashboard saved, or else what .env says."""
     d = _from_dashboard()
     p = str(d.get("provider") or config.AI_PROVIDER or "").strip().lower()
-    return {"provider": ALIASES.get(p, p),
-            "models": list(d["models"]) if d.get("provider") else list(config.AI_MODELS),
-            "base_url": (str(d.get("base_url") or "") if d.get("provider") else config.AI_BASE_URL).rstrip("/"),
+    p = ALIASES.get(p, p)
+    default_models = ["muse"] if p == "muse" else list(config.AI_MODELS)
+    default_base = "local://ai_bridge" if p == "muse" else config.AI_BASE_URL
+    return {"provider": p,
+            "models": list(d["models"]) if d.get("provider") else default_models,
+            "base_url": (str(d.get("base_url") or "") if d.get("provider") else default_base).rstrip("/"),
             "key": str(d["key"]) if d.get("provider") and "key" in d else config.ai_key()}
 
 
@@ -93,7 +97,84 @@ def base_url() -> str:
 
 def ready() -> bool:
     c = current()
+    if c["provider"] == "muse":
+        return True
     return bool(c["provider"] in PROVIDERS and c["models"] and base_url() and (c["key"] or c["provider"] in NO_KEY))
+
+
+def bridge_dirs():
+    pending = config.AI_BRIDGE_DIR / "pending"
+    done = config.AI_BRIDGE_DIR / "done"
+    pending.mkdir(parents=True, exist_ok=True)
+    done.mkdir(parents=True, exist_ok=True)
+    return pending, done
+
+
+_last_verdict_time: float | None = None
+
+
+def set_last_verdict_time(t: float):
+    global _last_verdict_time
+    _last_verdict_time = t
+
+
+def bridge_status() -> dict:
+    try:
+        pending_dir, done_dir = bridge_dirs()
+        pending_count = len(list(pending_dir.glob("*.json")))
+    except Exception:
+        pending_count = 0
+    return {
+        "pending_count": pending_count,
+        "last_verdict_time": _last_verdict_time,
+    }
+
+
+def write_bridge_request(kind: str, data: dict) -> str:
+    """Writes a request JSON to data/ai_bridge/pending/<request_id>.json."""
+    import uuid, time
+    req_id = data.get("request_id") or f"req_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    payload = {
+        "request_id": req_id,
+        "kind": kind,
+        "created_at": time.time(),
+        **data
+    }
+    pending_dir, _ = bridge_dirs()
+    target = pending_dir / f"{req_id}.json"
+    tmp = target.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(target)
+    return req_id
+
+
+def check_bridge_verdict(request_id: str) -> dict | None:
+    _, done_dir = bridge_dirs()
+    target = done_dir / f"{request_id}.json"
+    if not target.exists():
+        return None
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def consume_bridge_verdict(request_id: str) -> dict | None:
+    import time
+    verdict = check_bridge_verdict(request_id)
+    if verdict:
+        set_last_verdict_time(time.time())
+        pending_dir, done_dir = bridge_dirs()
+        try:
+            (done_dir / f"{request_id}.json").unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            (pending_dir / f"{request_id}.json").unlink(missing_ok=True)
+        except Exception:
+            pass
+    return verdict
 
 
 def public() -> dict:
@@ -103,6 +184,7 @@ def public() -> dict:
     return {"provider": c["provider"], "models": c["models"], "base_url": c["base_url"], "has_key": bool(c["key"]),
             "key_hint": c["key"][-4:] if len(c["key"]) >= 12 else "", "ready": ready(), "label": label(),
             "saved_here": bool(_from_dashboard().get("provider")),
+            "bridge": bridge_status(),
             "providers": [{"id": k, "label": v[0], "address": v[1], "needs_key": k not in NO_KEY, "key_url": v[3], "example": v[4]}
                           for k, v in PROVIDERS.items()]}
 
@@ -113,18 +195,22 @@ def save(provider_id: str, model_ids, address: str = "", new_key=None) -> dict:
     p = ALIASES.get(str(provider_id or "").strip().lower(), str(provider_id or "").strip().lower())
     if p not in PROVIDERS:
         raise ValueError("Choose one of the AI services in the list.")
-    if isinstance(model_ids, str):
-        model_ids = model_ids.split(",")
-    ms = [str(m).strip()[:120] for m in (model_ids or []) if str(m).strip()][:5]
-    if not ms:
-        raise ValueError("Enter the model to use.")
-    if any(not re.fullmatch(r"[\w.\-:/@]+", m) for m in ms):
-        raise ValueError("A model id has letters, digits and . - : / only.")
-    address = str(address or "").strip().rstrip("/")[:300]
-    if address and not re.fullmatch(r"https?://[^\s]+", address):
-        raise ValueError("The address has to start with http:// or https://")
-    if p == "custom" and not address:
-        raise ValueError("A custom service needs its address, for example http://127.0.0.1:1234/v1")
+    if p == "muse":
+        ms = ["muse"]
+        address = "local://ai_bridge"
+    else:
+        if isinstance(model_ids, str):
+            model_ids = model_ids.split(",")
+        ms = [str(m).strip()[:120] for m in (model_ids or []) if str(m).strip()][:5]
+        if not ms:
+            raise ValueError("Enter the model to use.")
+        if any(not re.fullmatch(r"[\w.\-:/@]+", m) for m in ms):
+            raise ValueError("A model id has letters, digits and . - : / only.")
+        address = str(address or "").strip().rstrip("/")[:300]
+        if address and not re.fullmatch(r"https?://[^\s]+", address):
+            raise ValueError("The address has to start with http:// or https://")
+        if p == "custom" and not address:
+            raise ValueError("A custom service needs its address, for example http://127.0.0.1:1234/v1")
     old = current()
     k = old["key"] if new_key is None and old["provider"] == p else str(new_key or "").strip()[:400]
     if not k and p not in NO_KEY:
@@ -148,6 +234,8 @@ def list_models(provider_id=None, address=None, with_key=None) -> list:
     p = ALIASES.get(str(provider_id or c["provider"]).lower(), str(provider_id or c["provider"]).lower())
     if p not in PROVIDERS:
         raise ValueError("Choose one of the AI services in the list.")
+    if p == "muse":
+        return ["muse"]
     k = str(with_key or "").strip() or (c["key"] if c["provider"] == p else "")
     base = str(address or "").strip().rstrip("/") or (c["base_url"] if c["provider"] == p else "") or PROVIDERS[p][1]
     if not base:
@@ -172,6 +260,8 @@ def list_models(provider_id=None, address=None, with_key=None) -> list:
 
 def test() -> dict:
     """One tiny request with the settings in use, to prove the key, the address and the model all work."""
+    if provider() == "muse":
+        return {"ok": True, "model": "muse", "tokens": 0, "answer": "Muse bridge ready"}
     ms = models()
     if not ready():
         raise ValueError("Save a service, a model and a key first.")
@@ -298,6 +388,8 @@ def call(model: str, prompt: str, schema: dict, timeout: float | None = None):
     `timeout` is how long one answer may take. A live stream passes a short one, because a slow
     answer must not stop the recording."""
     how = PROVIDERS[provider()][2]
+    if how == "bridge":
+        raise AIError("Muse operates via data/ai_bridge/ queue, not synchronous HTTP call.")
     return {"gemini": _gemini, "openai": _openai, "anthropic": _anthropic}[how](model, prompt, schema, timeout)
 
 
@@ -308,6 +400,9 @@ def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, i
     comes back empty, or says something the caller does not understand, and the caller carries on without
     it. The picture is a JPEG, passed as base64 inside the ordinary message."""
     if not ready() or not image or not models():
+        return "", 0, 0
+    how = PROVIDERS[provider()][2]
+    if how == "bridge":
         return "", 0, 0
     model = models()[0]
     b64 = base64.b64encode(image).decode()

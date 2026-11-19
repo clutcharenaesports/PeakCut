@@ -20,7 +20,8 @@ DEFAULTS = {"name": "", "channel": "", "style": "bounce", "layout": "blur", "cap
             "game": "",
             "trigger_words": "clip that, clip it",
             "autopost": False, "accounts": [], "post_min_score": 75, "post_gap_min": 45, "daily_cap": 6,
-            "privacy": "public", "post_footer": "", "rate_per_1k": 0.0, "channels": {}}
+            "privacy": "public", "post_footer": "", "rate_per_1k": 0.0, "channels": {},
+            "facecam": None}
 PLATFORMS = ("youtube", "twitch", "kick")
 
 
@@ -80,6 +81,19 @@ def _clean(data: dict) -> dict:
             v = v if v in ("both", "either") else "both"
         elif k == "privacy":
             v = v if v in ("public", "unlisted", "private") else "public"
+        elif k == "facecam":
+            fc = data.get(k)
+            if fc and isinstance(fc, (list, tuple)) and len(fc) == 4:
+                try:
+                    vals = [round(float(x), 4) for x in fc]
+                    if all(0.0 <= x <= 1.0 for x in vals) and vals[2] > 0 and vals[3] > 0 and vals[0] + vals[2] <= 1.01 and vals[1] + vals[3] <= 1.01:
+                        v = vals
+                    else:
+                        v = None
+                except (ValueError, TypeError):
+                    v = None
+            else:
+                v = None
         else:
             v = str(v).strip()[:300]
         out[k] = v
